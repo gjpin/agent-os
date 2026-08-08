@@ -1,0 +1,51 @@
+version: 2
+project_name: agent-os
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: agent-os
+    main: .
+    binary: agent-os
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/zero/agent-os/internal/cli.Version={{ .Version }}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    goamd64:
+      - v1
+    ignore:
+      - goos: darwin
+        goarch: amd64
+      - goos: linux
+        goarch: arm64
+
+archives:
+  - formats: [binary]
+    name_template: "agent-os_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+release:
+  github:
+    owner: zero
+    name: agent-os
+  mode: replace
+
+metadata:
+  mod_timestamp: "{{ .CommitTimestamp }}"
