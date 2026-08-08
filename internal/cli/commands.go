@@ -193,12 +193,31 @@ func (a *App) lifecycleCommand(action string) *cobra.Command {
 				}
 				var opErr error
 				if action == "start" {
+					forwarding, hasForwarding := p.(backend.Forwarding)
+					forwardingSpec := backend.Spec{Config: c, Architecture: architectureForHost()}
+					if hasForwarding {
+						if err := forwarding.ConfigureForwarding(cmd.Context(), forwardingSpec); err != nil {
+							return err
+						}
+					}
 					opErr = p.Start(cmd.Context(), c.VMName)
 				} else {
 					opErr = p.Stop(cmd.Context(), c.VMName)
 				}
 				if opErr != nil {
+					if action == "start" {
+						if forwarding, ok := p.(backend.Forwarding); ok {
+							_ = forwarding.RemoveForwarding(cmd.Context(), backend.Spec{Config: c, Architecture: architectureForHost()})
+						}
+					}
 					return opErr
+				}
+				if action == "stop" {
+					if forwarding, ok := p.(backend.Forwarding); ok {
+						if err := forwarding.RemoveForwarding(cmd.Context(), backend.Spec{Config: c, Architecture: architectureForHost()}); err != nil {
+							return err
+						}
+					}
 				}
 				value, err := store.Load(c.VMName)
 				if err != nil {
@@ -409,6 +428,11 @@ func (a *App) destroyCommand() *cobra.Command {
 				return err
 			}
 			return store.WithLock(cmd.Context(), c.VMName, func() error {
+				if forwarding, ok := p.(backend.Forwarding); ok {
+					if err := forwarding.RemoveForwarding(cmd.Context(), backend.Spec{Config: c, Architecture: architectureForHost()}); err != nil && !force {
+						return err
+					}
+				}
 				if err := p.Destroy(cmd.Context(), c.VMName); err != nil && !force {
 					return err
 				}

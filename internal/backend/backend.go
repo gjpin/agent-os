@@ -52,6 +52,7 @@ type Networking interface {
 
 type Forwarding interface {
 	ConfigureForwarding(context.Context, Spec) error
+	RemoveForwarding(context.Context, Spec) error
 }
 
 type Provisioning interface {

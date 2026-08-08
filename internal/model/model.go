@@ -92,6 +92,8 @@ func (c Config) Validate() error {
 	if c.AccessMode == AccessWireGuard {
 		if strings.TrimSpace(c.WireGuardInterface) == "" {
 			problems = append(problems, "wireguard.interface is required when access.mode is wireguard")
+		} else if !validInterfaceName(c.WireGuardInterface) {
+			problems = append(problems, "wireguard.interface must be a valid host interface name")
 		}
 		if strings.TrimSpace(c.WireGuardAddress) == "" {
 			problems = append(problems, "wireguard.address is required when access.mode is wireguard")
@@ -133,6 +135,18 @@ func validAddress(value string) bool {
 	}
 	_, _, err := net.ParseCIDR(value)
 	return err == nil
+}
+
+func validInterfaceName(value string) bool {
+	if len(value) == 0 || len(value) > 15 {
+		return false
+	}
+	for _, r := range value {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' && r != '-' && r != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 // AdaptResources retains host capacity while honoring the documented maximum

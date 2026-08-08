@@ -48,17 +48,10 @@ func (l Libvirt) Create(ctx context.Context, spec Spec) error {
 	if err := os.WriteFile(xmlPath, []byte(xml), 0o600); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(artifactDir, "network.xml"), []byte(artifacts.LibvirtNetworkXML()), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(artifactDir, "network.xml"), []byte(artifacts.LibvirtNetworkXML(definition)), 0o600); err != nil {
 		return err
 	}
-	bindAddress := "0.0.0.0"
-	if spec.Config.AccessMode == model.AccessWireGuard {
-		bindAddress = spec.Config.WireGuardAddress
-		if slash := strings.IndexByte(bindAddress, '/'); slash >= 0 {
-			bindAddress = bindAddress[:slash]
-		}
-	}
-	if err := os.WriteFile(filepath.Join(artifactDir, "orca.service"), []byte(artifacts.OrcaSystemdUnit(spec.Config.OrcaPort, bindAddress)), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(artifactDir, "orca.service"), []byte(artifacts.OrcaSystemdUnit(definition.OrcaPort, definition.BindAddress, definition.PairingAddress)), 0o600); err != nil {
 		return err
 	}
 	if err := os.WriteFile(filepath.Join(artifactDir, "user-data"), []byte(artifacts.CloudInit(definition, spec.Config.RepositoryKeyPath)), 0o600); err != nil {
@@ -91,6 +84,61 @@ func (l Libvirt) Create(ctx context.Context, spec Spec) error {
 		return err
 	}
 	return command(l.Runner, ctx, "virsh", []string{"--connect", "qemu:///system", "define", xmlPath}, nil, l.Out, l.Err)
+}
+
+func (l Libvirt) EnsureNetwork(ctx context.Context, spec Spec) error {
+	artifactDir := filepath.Join(spec.Config.StateDir, "v1", "vms", spec.Config.VMName, "artifacts")
+	if err := os.MkdirAll(artifactDir, 0o700); err != nil {
+		return err
+	}
+	definition := artifacts.FromConfig(spec.Config, spec.Architecture)
+	path := filepath.Join(artifactDir, "network.xml")
+	if err := os.WriteFile(path, []byte(artifacts.LibvirtNetworkXML(definition)), 0o600); err != nil {
+		return err
+	}
+	return l.ensureNetwork(ctx, path)
+}
+
+// ConfigureForwarding installs a per-VM nftables DNAT rule on the Linux host.
+// The libvirt network itself only provides outbound NAT; it does not expose a
+// guest service on a selected host address.
+func (l Libvirt) ConfigureForwarding(ctx context.Context, spec Spec) error {
+	if spec.Config.AccessMode == model.AccessWireGuard {
+		if err := command(l.Runner, ctx, "sudo", []string{"ip", "link", "show", "dev", spec.Config.WireGuardInterface}, nil, l.Out, l.Err); err != nil {
+			return fmt.Errorf("WireGuard interface %q is unavailable: %w", spec.Config.WireGuardInterface, err)
+		}
+	}
+	if err := command(l.Runner, ctx, "sudo", []string{"sysctl", "-w", "net.ipv4.ip_forward=1"}, nil, l.Out, l.Err); err != nil {
+		return fmt.Errorf("enable IPv4 forwarding: %w", err)
+	}
+	rules, err := artifacts.LinuxForwardingRules(spec.Config, artifacts.LibvirtGuestAddress(spec.Config.VMName))
+	if err != nil {
+		return err
+	}
+	// Reapplying start is idempotent. A stale table can remain after an
+	// interrupted lifecycle operation, so remove only this VM's table first.
+	_ = l.deleteForwardingTable(ctx, spec)
+	if err := command(l.Runner, ctx, "sudo", []string{"nft", "-f", "-"}, strings.NewReader(rules), l.Out, l.Err); err != nil {
+		return fmt.Errorf("install Orca forwarding rules: %w", err)
+	}
+	return nil
+}
+
+func (l Libvirt) RemoveForwarding(ctx context.Context, spec Spec) error {
+	return l.deleteForwardingTable(ctx, spec)
+}
+
+func (l Libvirt) deleteForwardingTable(ctx context.Context, spec Spec) error {
+	// nft reports a missing table as an error. Treat that case as success so
+	// stop/destroy remain safe when forwarding was never installed.
+	var listing bytes.Buffer
+	if err := command(l.Runner, ctx, "sudo", []string{"nft", "list", "table", "ip", artifacts.ForwardingTableName(spec.Config.VMName)}, nil, &listing, io.Discard); err != nil {
+		return nil
+	}
+	if err := command(l.Runner, ctx, "sudo", []string{"nft", "delete", "table", "ip", artifacts.ForwardingTableName(spec.Config.VMName)}, nil, l.Out, l.Err); err != nil {
+		return fmt.Errorf("remove Orca forwarding rules: %w", err)
+	}
+	return nil
 }
 
 func (l Libvirt) ensureNetwork(ctx context.Context, definitionPath string) error {

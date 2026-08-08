@@ -1,8 +1,10 @@
 package artifacts
 
 import (
+	"crypto/sha256"
 	"encoding/xml"
 	"fmt"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,36 +15,42 @@ import (
 )
 
 type VMDefinition struct {
-	Name          string
-	CPUs          int
-	MemoryMiB     int
-	DiskGiB       int
-	Architecture  string
-	AccessMode    model.AccessMode
-	OrcaPort      int
-	Packages      []string
-	ImagePath     string
-	BindAddress   string
-	SecurityModel string
-	AllowedCIDRs  []string
+	Name           string
+	CPUs           int
+	MemoryMiB      int
+	DiskGiB        int
+	Architecture   string
+	AccessMode     model.AccessMode
+	OrcaPort       int
+	Packages       []string
+	ImagePath      string
+	BindAddress    string
+	PairingAddress string
+	GuestAddress   string
+	MACAddress     string
+	SecurityModel  string
+	AllowedCIDRs   []string
 }
 
 func FromConfig(c model.Config, architecture string) VMDefinition {
 	packages := append([]string(nil), c.Packages...)
 	sort.Strings(packages)
-	bindAddress := "0.0.0.0"
+	pairingAddress := "127.0.0.1"
 	if c.AccessMode == model.AccessWireGuard && c.WireGuardAddress != "" {
-		bindAddress = c.WireGuardAddress
-		if slash := strings.IndexByte(bindAddress, '/'); slash >= 0 {
-			bindAddress = bindAddress[:slash]
-		}
+		pairingAddress = addressHostPart(c.WireGuardAddress)
 	}
 	return VMDefinition{
 		Name: c.VMName, CPUs: c.VMCPUs, MemoryMiB: c.VMMemoryMiB,
 		DiskGiB: c.VMDiskGiB, Architecture: architecture,
 		AccessMode: c.AccessMode, OrcaPort: c.OrcaPort, Packages: packages,
-		BindAddress:  bindAddress,
-		AllowedCIDRs: append([]string(nil), c.AllowedCIDRs...),
+		// The WireGuard address is on the host, not in the guest. The host
+		// forwarding layer selects the externally reachable address while
+		// Orca listens on the guest NIC.
+		BindAddress:    "0.0.0.0",
+		PairingAddress: pairingAddress,
+		GuestAddress:   LibvirtGuestAddress(c.VMName),
+		MACAddress:     LibvirtMACAddress(c.VMName),
+		AllowedCIDRs:   append([]string(nil), c.AllowedCIDRs...),
 	}
 }
 
@@ -57,6 +65,10 @@ func LibvirtXML(def VMDefinition, diskPath, cloudInitPath string) (string, error
 		return "", fmt.Errorf("invalid VM resources")
 	}
 	name, disk, seed := xmlEscape(def.Name), xmlEscape(diskPath), xmlEscape(cloudInitPath)
+	mac := ""
+	if def.MACAddress != "" {
+		mac = fmt.Sprintf("      <mac address=\"%s\"/>\n", xmlEscape(def.MACAddress))
+	}
 	return fmt.Sprintf(`<domain type="kvm">
   <name>%s</name>
   <memory unit="MiB">%d</memory>
@@ -92,7 +104,7 @@ func LibvirtXML(def VMDefinition, diskPath, cloudInitPath string) (string, error
       <readonly/>
     </disk>
     <interface type="network">
-      <source network="agent-os-nat"/>
+%s      <source network="agent-os-nat"/>
       <model type="virtio"/>
       <driver name="qemu" iommu="on"/>
     </interface>
@@ -102,7 +114,7 @@ func LibvirtXML(def VMDefinition, diskPath, cloudInitPath string) (string, error
     <serial type="pty"><target type="isa-serial" port="0"/></serial>
   </devices>
 </domain>
-`, name, def.MemoryMiB, def.MemoryMiB, def.CPUs, def.CPUs, securityModel(def.SecurityModel), architecture(def.Architecture), disk, seed), nil
+`, name, def.MemoryMiB, def.MemoryMiB, def.CPUs, def.CPUs, securityModel(def.SecurityModel), architecture(def.Architecture), mac, disk, seed), nil
 }
 
 func architecture(value string) string {
@@ -154,10 +166,10 @@ func LimaYAML(def VMDefinition) (string, error) {
 	appendIndented(&b, orcaInstallScript, "      ")
 	b.WriteString("      AGENT_OS_ORCA_INSTALL\n      /bin/bash /run/agent-os-install-orca\n")
 	b.WriteString("      install -d -m 0755 /etc/agent-os\n      cat > /etc/systemd/system/orca.service <<'AGENT_OS_ORCA_UNIT'\n")
-	appendIndented(&b, OrcaSystemdUnit(def.OrcaPort, def.BindAddress), "      ")
+	appendIndented(&b, OrcaSystemdUnit(def.OrcaPort, def.BindAddress, def.PairingAddress), "      ")
 	b.WriteString("      AGENT_OS_ORCA_UNIT\n")
 	b.WriteString("      cat > /etc/agent-os/firewall.rules <<'AGENT_OS_FIREWALL'\n")
-	appendIndented(&b, strings.Join(FirewallRules(def.AllowedCIDRs), "\n"), "      ")
+	appendIndented(&b, strings.Join(FirewallRules(def.AllowedCIDRs, def.OrcaPort), "\n"), "      ")
 	b.WriteString("      AGENT_OS_FIREWALL\n      cat > /etc/systemd/system/agent-os-firewall.service <<'AGENT_OS_FIREWALL_UNIT'\n")
 	appendIndented(&b, FirewallSystemdUnit(), "      ")
 	b.WriteString("      AGENT_OS_FIREWALL_UNIT\n      systemctl daemon-reload\n      systemctl enable --now agent-os-firewall.service\n      systemctl enable --now orca.service\n")
@@ -184,9 +196,9 @@ func CloudInit(def VMDefinition, repositoryKeyPath string) string {
 		b.WriteString("  - path: /etc/agent-os/repository-key-source\n    permissions: '0600'\n    content: |\n      Provisioning source is operator-supplied; key material is not in cloud-init.\n")
 	}
 	b.WriteString("  - path: /etc/systemd/system/orca.service\n    permissions: '0644'\n    content: |\n")
-	appendIndented(&b, OrcaSystemdUnit(def.OrcaPort, def.BindAddress), "      ")
+	appendIndented(&b, OrcaSystemdUnit(def.OrcaPort, def.BindAddress, def.PairingAddress), "      ")
 	b.WriteString("  - path: /etc/agent-os/firewall.rules\n    permissions: '0600'\n    content: |\n")
-	appendIndented(&b, strings.Join(FirewallRules(def.AllowedCIDRs), "\n"), "      ")
+	appendIndented(&b, strings.Join(FirewallRules(def.AllowedCIDRs, def.OrcaPort), "\n"), "      ")
 	orcaInstallScript, err := releases.OrcaInstallScript(def.Architecture)
 	if err != nil {
 		return "#cloud-config\n# invalid Orca architecture: " + err.Error() + "\n"
@@ -208,7 +220,11 @@ func appendIndented(b *strings.Builder, value, prefix string) {
 	}
 }
 
-func OrcaSystemdUnit(port int, bindAddress string) string {
+func OrcaSystemdUnit(port int, bindAddress string, pairingAddress ...string) string {
+	pairing := bindAddress
+	if len(pairingAddress) > 0 && strings.TrimSpace(pairingAddress[0]) != "" {
+		pairing = pairingAddress[0]
+	}
 	return fmt.Sprintf(`[Unit]
 Description=Orca headless remote server
 After=network-online.target
@@ -232,20 +248,26 @@ ReadWritePaths=/home/agent
 
 [Install]
 WantedBy=multi-user.target
-`, port, bindAddress, port, bindAddress)
+`, port, pairing, port, bindAddress)
 }
 
-func LibvirtNetworkXML() string {
-	return `<network>
+func LibvirtNetworkXML(definitions ...VMDefinition) string {
+	dhcpHost := ""
+	if len(definitions) > 0 && definitions[0].MACAddress != "" && definitions[0].GuestAddress != "" {
+		dhcpHost = fmt.Sprintf("    <host mac=\"%s\" name=\"%s\" ip=\"%s\"/>\n",
+			xmlEscape(definitions[0].MACAddress), xmlEscape(definitions[0].Name), xmlEscape(definitions[0].GuestAddress))
+	}
+	return fmt.Sprintf(`<network>
   <name>agent-os-nat</name>
   <forward mode="nat"/>
   <bridge name="agent-os0" stp="on" delay="0"/>
   <domain name="agent-os.internal" localOnly="yes"/>
   <ip address="192.168.240.1" netmask="255.255.255.0">
-    <dhcp><range start="192.168.240.10" end="192.168.240.240"/></dhcp>
+    <dhcp><range start="192.168.240.10" end="192.168.240.240"/>
+%s    </dhcp>
   </ip>
 </network>
-`
+`, dhcpHost)
 }
 
 func LimaPortForward(c model.Config) string {
@@ -256,10 +278,10 @@ func LimaPortForward(c model.Config) string {
 			hostIP = hostIP[:slash]
 		}
 	}
-	return fmt.Sprintf("portForwards:\n  - guestPort: %d\n    hostPort: %d\n    hostIP: %s\n", c.OrcaPort, c.OrcaPort, strconv.Quote(hostIP))
+	return fmt.Sprintf("portForwards:\n  - guestPort: %d\n    hostPort: %d\n    hostIP: %s\n    guestIP: 0.0.0.0\n    guestIPMustBeZero: false\n    static: true\n", c.OrcaPort, c.OrcaPort, strconv.Quote(hostIP))
 }
 
-func FirewallRules(allowedCIDRs []string) []string {
+func FirewallRules(allowedCIDRs []string, orcaPort ...int) []string {
 	rules := []string{
 		"nft add table inet agent_os",
 		"nft add chain inet agent_os forward { type filter hook forward priority 0; policy drop; }",
@@ -273,12 +295,109 @@ func FirewallRules(allowedCIDRs []string) []string {
 		"nft add rule inet agent_os output oifname \"eth0\" ip6 daddr fc00::/7 drop",
 		"nft add chain inet agent_os input { type filter hook input priority 0; policy drop; }",
 	}
+	if len(orcaPort) > 0 && orcaPort[0] >= 1 && orcaPort[0] <= 65535 {
+		rules = append(rules, fmt.Sprintf("nft add rule inet agent_os input iifname \"eth0\" tcp dport %d accept", orcaPort[0]))
+	}
 	for _, cidr := range allowedCIDRs {
 		if strings.TrimSpace(cidr) != "" {
 			rules = append(rules, fmt.Sprintf("nft add rule inet agent_os output oifname \"eth0\" ip daddr %s accept", cidr))
 		}
 	}
 	return rules
+}
+
+// LibvirtGuestAddress and LibvirtMACAddress provide a stable DHCP reservation
+// for each VM. Host forwarding must target the guest's address, and querying a
+// lease after every boot would leave a window where the VM is unreachable.
+func LibvirtGuestAddress(name string) string {
+	digest := sha256.Sum256([]byte(name))
+	return fmt.Sprintf("192.168.240.%d", 10+int(digest[0])%231)
+}
+
+func LibvirtMACAddress(name string) string {
+	digest := sha256.Sum256([]byte(name))
+	return fmt.Sprintf("52:54:00:%02x:%02x:%02x", digest[0], digest[1], digest[2])
+}
+
+func ForwardingTableName(name string) string {
+	digest := sha256.Sum256([]byte(name))
+	return fmt.Sprintf("agent_os_fwd_%x", digest[:6])
+}
+
+// LinuxForwardingRules returns an IPv4 nftables ruleset for the selected host
+// endpoint. The libvirt network is IPv4-only, so reject an IPv6 WireGuard
+// address explicitly instead of installing a rule that can never work.
+func LinuxForwardingRules(c model.Config, guestAddress string) (string, error) {
+	guestIP := net.ParseIP(addressHostPart(guestAddress)).To4()
+	if guestIP == nil {
+		return "", fmt.Errorf("libvirt guest address must be IPv4")
+	}
+	if c.OrcaPort < 1 || c.OrcaPort > 65535 {
+		return "", fmt.Errorf("invalid Orca port %d", c.OrcaPort)
+	}
+	if c.AccessMode == model.AccessWireGuard {
+		if !validInterfaceName(c.WireGuardInterface) {
+			return "", fmt.Errorf("invalid WireGuard interface %q", c.WireGuardInterface)
+		}
+		if net.ParseIP(addressHostPart(c.WireGuardAddress)).To4() == nil {
+			return "", fmt.Errorf("Linux forwarding requires an IPv4 WireGuard address")
+		}
+	}
+
+	guest := guestIP.String()
+	table := ForwardingTableName(c.VMName)
+	lines := []string{
+		fmt.Sprintf("table ip %s {", table),
+		"  chain prerouting {",
+		"    type nat hook prerouting priority -100; policy accept;",
+	}
+	if c.AccessMode == model.AccessWireGuard {
+		lines = append(lines, fmt.Sprintf("    iifname %q ip daddr %s tcp dport %d dnat to %s:%d", c.WireGuardInterface, addressHostPart(c.WireGuardAddress), c.OrcaPort, guest, c.OrcaPort))
+	}
+	lines = append(lines,
+		"  }",
+		"  chain output {",
+		"    type nat hook output priority -100; policy accept;",
+	)
+	if c.AccessMode == model.AccessLocal {
+		lines = append(lines, fmt.Sprintf("    ip daddr 127.0.0.1 tcp dport %d dnat to %s:%d", c.OrcaPort, guest, c.OrcaPort))
+	}
+	lines = append(lines,
+		"  }",
+		"  chain postrouting {",
+		"    type nat hook postrouting priority 100; policy accept;",
+		fmt.Sprintf("    oifname \"agent-os0\" ip daddr %s tcp dport %d masquerade", guest, c.OrcaPort),
+		"  }",
+		"  chain forward {",
+		"    type filter hook forward priority -50; policy accept;",
+		"    ct state established,related accept",
+	)
+	if c.AccessMode == model.AccessWireGuard {
+		lines = append(lines, fmt.Sprintf("    iifname %q oifname \"agent-os0\" ip daddr %s tcp dport %d accept", c.WireGuardInterface, guest, c.OrcaPort))
+	} else {
+		lines = append(lines, fmt.Sprintf("    ip saddr 127.0.0.1 oifname \"agent-os0\" ip daddr %s tcp dport %d accept", guest, c.OrcaPort))
+	}
+	lines = append(lines, "  }", "}", "")
+	return strings.Join(lines, "\n"), nil
+}
+
+func addressHostPart(value string) string {
+	if slash := strings.IndexByte(value, '/'); slash >= 0 {
+		return value[:slash]
+	}
+	return value
+}
+
+func validInterfaceName(value string) bool {
+	if len(value) == 0 || len(value) > 15 {
+		return false
+	}
+	for _, r := range value {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' && r != '-' && r != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 func FirewallSystemdUnit() string {

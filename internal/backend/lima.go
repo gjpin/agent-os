@@ -31,6 +31,23 @@ func (l Lima) Available(ctx context.Context) error {
 	return nil
 }
 
+// Lima owns the host listener from the static portForwards rule in lima.yaml.
+// In plain mode only static rules are honored; this method verifies the
+// selected WireGuard interface before the VM is started.
+func (l Lima) ConfigureForwarding(ctx context.Context, spec Spec) error {
+	if spec.Config.AccessMode != model.AccessWireGuard {
+		return nil
+	}
+	if err := command(l.Runner, ctx, "ifconfig", []string{spec.Config.WireGuardInterface}, nil, l.Out, l.Err); err != nil {
+		return fmt.Errorf("WireGuard interface %q is unavailable: %w", spec.Config.WireGuardInterface, err)
+	}
+	return nil
+}
+
+func (l Lima) RemoveForwarding(context.Context, Spec) error { return nil }
+
+func (l Lima) EnsureNetwork(context.Context, Spec) error { return nil }
+
 func (l Lima) Create(ctx context.Context, spec Spec) error {
 	definition := artifacts.FromConfig(spec.Config, spec.Architecture)
 	artifactDir := filepath.Join(spec.Config.StateDir, "v1", "vms", spec.Config.VMName, "artifacts")
