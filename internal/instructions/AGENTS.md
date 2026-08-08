@@ -18,6 +18,7 @@
 ## Development
 
 - During development, check the latest relevant documentation when implementation details, APIs, tooling, dependencies, configuration, or recommended practices may have changed.
+- When you need to explore or find something across a Git repository rather than inspect a specific file or URL, prefer cloning the repository into a temporary directory and searching it locally instead of making many separate requests for individual files.
 
 ## GitHub Actions
 
