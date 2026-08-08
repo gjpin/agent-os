@@ -15,6 +15,10 @@
 
 - When installing or recommending packages, use the latest stable release versions.
 
+## Development
+
+- During development, check the latest relevant documentation when implementation details, APIs, tooling, dependencies, configuration, or recommended practices may have changed.
+
 ## GitHub Actions
 
 - When creating or updating GitHub Actions workflows, always use the latest stable release of each action.
@@ -27,3 +31,12 @@ Example:
 ```yaml
 uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 ```
+
+## README.md
+
+Keep `README.md` concise and focused on new users. It should contain these sections in this order:
+
+1. **Description** — a very short description of what the project is.
+2. **Features** — a list of functional features that are useful to end users.
+3. **Quickstart** — a short section with the commands a new user needs to get started.
+4. **Build and Test** — a short section with the commands needed to build and test the project.

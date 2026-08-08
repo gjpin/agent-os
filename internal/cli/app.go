@@ -7,13 +7,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
 
-	"github.com/spf13/cobra"
 	"github.com/gjpin/agent-os/internal/backend"
 	"github.com/gjpin/agent-os/internal/config"
 	"github.com/gjpin/agent-os/internal/execx"
@@ -21,6 +21,7 @@ import (
 	"github.com/gjpin/agent-os/internal/logging"
 	"github.com/gjpin/agent-os/internal/model"
 	"github.com/gjpin/agent-os/internal/state"
+	"github.com/spf13/cobra"
 )
 
 type App struct {
@@ -28,6 +29,15 @@ type App struct {
 	Out    io.Writer
 	Err    io.Writer
 	Runner execx.Runner
+	// LookPath is injectable for prerequisite probing tests. New initializes
+	// it to exec.LookPath; callers constructing App directly may leave it nil.
+	LookPath func(string) (string, error)
+	// PathExists is the companion probe for data-only prerequisites such as
+	// Ubuntu's OVMF firmware package.
+	PathExists func(string) bool
+	// ReadFile is injectable for host configuration tests. New initializes it
+	// to os.ReadFile.
+	ReadFile func(string) ([]byte, error)
 
 	root              *cobra.Command
 	resolved          config.Resolved
@@ -63,7 +73,16 @@ func NewWithInstructions(in io.Reader, out, errOut io.Writer, runner execx.Runne
 	if runner == nil {
 		runner = execx.OSRunner{}
 	}
-	app := &App{In: in, Out: out, Err: errOut, Runner: runner, agentInstructions: agentInstructions}
+	app := &App{
+		In: in, Out: out, Err: errOut, Runner: runner,
+		LookPath: exec.LookPath,
+		PathExists: func(path string) bool {
+			_, err := os.Stat(path)
+			return err == nil
+		},
+		ReadFile:          os.ReadFile,
+		agentInstructions: agentInstructions,
+	}
 	app.root = app.newRoot()
 	return app
 }
@@ -90,11 +109,20 @@ func (a *App) newRoot() *cobra.Command {
 		Short:         "Manage isolated Fedora agent VMs",
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			if cmd.Name() == "completion" || cmd.Name() == "setup-host" {
 				return nil
 			}
 			a.flagValues = a.collectFlagValues(cmd)
+			promptFields := []string(nil)
+			if cmd.Name() == "create" && !flagChanged(cmd, "dry-run") {
+				// Positional names are explicit overrides and must suppress the
+				// VM-name prompt just like a config/env/flag value does.
+				if len(args) == 1 && strings.TrimSpace(args[0]) != "" {
+					a.flagValues["vm.name"] = args[0]
+				}
+				promptFields = []string{"vm.name", "access.mode", "orca.port"}
+			}
 			loadPath := a.configPath
 			// `config init --config path` is the one command that is expected to
 			// operate before that new file exists.
@@ -106,6 +134,7 @@ func (a *App) newRoot() *cobra.Command {
 				ExplicitConfigPath: loadPath,
 				FlagValues:         a.flagValues,
 				PromptRequired:     promptRequired,
+				PromptFields:       promptFields,
 				PromptIn:           a.In,
 				PromptOut:          a.Out,
 				IsTTY:              isTTY(a.In),
@@ -150,6 +179,11 @@ func (a *App) newRoot() *cobra.Command {
 	root.AddCommand(a.configCommand())
 	root.AddCommand(a.completionCommand(root))
 	return root
+}
+
+func flagChanged(cmd *cobra.Command, name string) bool {
+	flag := cmd.Flags().Lookup(name)
+	return flag != nil && flag.Changed
 }
 
 func (a *App) collectFlagValues(cmd *cobra.Command) map[string]any {

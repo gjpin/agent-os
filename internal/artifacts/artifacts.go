@@ -2,6 +2,7 @@ package artifacts
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/xml"
 	"fmt"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gjpin/agent-os/internal/credentials"
 	"github.com/gjpin/agent-os/internal/model"
 	"github.com/gjpin/agent-os/internal/provision"
 	"github.com/gjpin/agent-os/internal/releases"
@@ -31,6 +33,7 @@ type VMDefinition struct {
 	SecurityModel     string
 	AllowedCIDRs      []string
 	AgentInstructions string
+	RepositoryKeyPath string
 }
 
 func FromConfig(c model.Config, architecture string) VMDefinition {
@@ -47,17 +50,24 @@ func FromConfig(c model.Config, architecture string) VMDefinition {
 		// The WireGuard address is on the host, not in the guest. The host
 		// forwarding layer selects the externally reachable address while
 		// Orca listens on the guest NIC.
-		BindAddress:    "0.0.0.0",
-		PairingAddress: pairingAddress,
-		GuestAddress:   LibvirtGuestAddress(c.VMName),
-		MACAddress:     LibvirtMACAddress(c.VMName),
-		AllowedCIDRs:   append([]string(nil), c.AllowedCIDRs...),
+		BindAddress:       "0.0.0.0",
+		PairingAddress:    pairingAddress,
+		GuestAddress:      LibvirtGuestAddress(c.VMName),
+		MACAddress:        LibvirtMACAddress(c.VMName),
+		AllowedCIDRs:      append([]string(nil), c.AllowedCIDRs...),
+		RepositoryKeyPath: c.RepositoryKeyPath,
 	}
 }
 
-// LibvirtXML deliberately omits graphics, audio, USB, clipboard, agent
-// channels, virtiofs/9p, and host socket sharing. The disk path and network
-// name are provider-owned values, not user-interpolated shell fragments.
+// LibvirtXML deliberately omits graphics, audio, USB passthrough, clipboard,
+// virtiofs/9p, and host socket sharing. The disk path and network name are
+// provider-owned values, not user-interpolated shell fragments. Libvirt's
+// QEMU driver supplies the host-level seccomp, private-namespace, and device
+// cgroup controls; the backend preflights qemu.conf so those defaults have not
+// been explicitly disabled. The backend requires those settings to be present
+// in qemu.conf and verifies libvirt's native QEMU translation before defining
+// the domain. The QEMU guest-agent channel is the one host/guest control
+// channel required by the Linux management backend.
 func LibvirtXML(def VMDefinition, diskPath, cloudInitPath string) (string, error) {
 	if def.Name == "" || diskPath == "" || cloudInitPath == "" {
 		return "", fmt.Errorf("name, disk path, and cloud-init path are required")
@@ -75,14 +85,11 @@ func LibvirtXML(def VMDefinition, diskPath, cloudInitPath string) (string, error
   <memory unit="MiB">%d</memory>
   <currentMemory unit="MiB">%d</currentMemory>
   <vcpu placement="static" current="%d">%d</vcpu>
-  <resource>
-    <partition>/machine.slice/agent-os.slice</partition>
-  </resource>
-	<features>
-	    <acpi/>
-	    <vmport state="off"/>
-	  </features>
-	  <seclabel type="dynamic" model="%s" relabel="yes"/>
+  <features>
+    <acpi/>
+    <vmport state="off"/>
+  </features>
+  <seclabel type="dynamic" model="%s" relabel="yes"/>
   <cpu mode="host-passthrough" check="none"/>
   <os>
     <type arch="%s" machine="q35">hvm</type>
@@ -109,6 +116,10 @@ func LibvirtXML(def VMDefinition, diskPath, cloudInitPath string) (string, error
       <model type="virtio"/>
       <driver name="qemu" iommu="on"/>
     </interface>
+    <controller type="usb" index="0" model="none"/>
+    <channel type="unix">
+      <target type="virtio" name="org.qemu.guest_agent.0"/>
+    </channel>
     <console type="pty"><target type="serial" port="0"/></console>
     <rng model="virtio"><backend model="random">/dev/urandom</backend></rng>
     <memballoon model="virtio"/>
@@ -153,17 +164,29 @@ func LimaYAML(def VMDefinition) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	repositoryKeyScript, err := repositoryKeyProvisionScript(def.RepositoryKeyPath)
+	if err != nil {
+		return "", fmt.Errorf("provision repository private key: %w", err)
+	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "arch: %s\nvmType: vz\nplain: true\nrosetta: false\ncontainerd: false\n", architecture(def.Architecture))
+	fmt.Fprintf(&b, "arch: %s\nvmType: vz\nplain: true\nrosetta:\n  enabled: false\n  binfmt: false\ncontainerd:\n  system: false\n  user: false\n", architecture(def.Architecture))
 	fmt.Fprintf(&b, "cpus: %d\nmemory: %s\ndisk: %dGiB\n", def.CPUs, memorySize(def.MemoryMiB), def.DiskGiB)
 	if def.ImagePath != "" {
 		fmt.Fprintf(&b, "images:\n  - location: %s\n    arch: %s\n", strconv.Quote(def.ImagePath), architecture(def.Architecture))
 	}
 	agentInstructionsScript := provision.AgentInstructionsScript(def.AgentInstructions)
-	b.WriteString("mountType: none\nmounts: []\nssh: true\nsshLoadDotSSHPubKeys: false\n\nprovision:\n  - mode: system\n    script: |")
+	firewallArgs := optionalPort(def.OrcaPort)
+	firewallRules, err := FirewallRulesChecked(def.AllowedCIDRs, firewallArgs...)
+	if err != nil {
+		return "", fmt.Errorf("generate guest firewall: %w", err)
+	}
+	b.WriteString("mounts: []\nssh:\n  loadDotSSHPubKeys: false\n  forwardAgent: false\n\nprovision:\n  - mode: system\n    script: |")
 	b.WriteString("\n      set -eu\n      useradd --create-home --shell /bin/bash agent || true\n")
 	b.WriteString("      usermod --lock agent || true\n")
 	b.WriteString("      systemctl disable --now containerd.service 2>/dev/null || true\n")
+	if repositoryKeyScript != "" {
+		appendIndented(&b, repositoryKeyScript, "      ")
+	}
 	agentInstructionsDelimiter := heredocDelimiter("AGENT_OS_AGENT_INSTRUCTIONS", agentInstructionsScript)
 	fmt.Fprintf(&b, "      cat > /run/agent-os-provision-agent-instructions <<'%s'\n", agentInstructionsDelimiter)
 	appendIndented(&b, agentInstructionsScript, "      ")
@@ -175,7 +198,7 @@ func LimaYAML(def VMDefinition) (string, error) {
 	appendIndented(&b, OrcaSystemdUnit(def.OrcaPort, def.BindAddress, def.PairingAddress), "      ")
 	b.WriteString("      AGENT_OS_ORCA_UNIT\n")
 	b.WriteString("      cat > /etc/agent-os/firewall.rules <<'AGENT_OS_FIREWALL'\n")
-	appendIndented(&b, strings.Join(FirewallRules(def.AllowedCIDRs, def.OrcaPort), "\n"), "      ")
+	appendIndented(&b, strings.Join(firewallRules, "\n"), "      ")
 	b.WriteString("      AGENT_OS_FIREWALL\n      cat > /etc/systemd/system/agent-os-firewall.service <<'AGENT_OS_FIREWALL_UNIT'\n")
 	appendIndented(&b, FirewallSystemdUnit(), "      ")
 	b.WriteString("      AGENT_OS_FIREWALL_UNIT\n      systemctl daemon-reload\n      systemctl enable --now agent-os-firewall.service\n      systemctl enable --now orca.service\n")
@@ -183,33 +206,77 @@ func LimaYAML(def VMDefinition) (string, error) {
 }
 
 func CloudInit(def VMDefinition, repositoryKeyPath string) string {
+	contents, err := cloudInit(def, repositoryKeyPath)
+	if err == nil {
+		return contents
+	}
+
+	// The CLI validates the key before a normal create. Keep this legacy
+	// string-returning API safe for callers that bypass that validation: emit a
+	// usable artifact without the key, but never include the host path or the
+	// validation error in guest data. Callers that need an error can use
+	// CloudInitWithError.
+	fallbackDefinition := def
+	fallbackDefinition.RepositoryKeyPath = ""
+	fallback, fallbackErr := cloudInit(fallbackDefinition, "")
+	if fallbackErr == nil {
+		return strings.Replace(fallback, "#cloud-config\n", "#cloud-config\n# repository private key was not provisioned\n", 1)
+	}
+	return "#cloud-config\n# repository private key was not provisioned\n"
+}
+
+// CloudInitWithError is the error-returning form used by tests and callers
+// that want to fail creation rather than receive the compatibility fallback
+// from CloudInit.
+func CloudInitWithError(def VMDefinition, repositoryKeyPath string) (string, error) {
+	return cloudInit(def, repositoryKeyPath)
+}
+
+func cloudInit(def VMDefinition, repositoryKeyPath string) (string, error) {
+	if strings.TrimSpace(repositoryKeyPath) == "" {
+		repositoryKeyPath = def.RepositoryKeyPath
+	}
+	guestKeyPath, encodedKey, err := repositoryKeyData(repositoryKeyPath)
+	if err != nil {
+		return "", err
+	}
 	var b strings.Builder
 	b.WriteString("#cloud-config\n")
 	b.WriteString("users:\n  - name: agent\n    gecos: Agent\n    groups: []\n    shell: /bin/bash\n    lock_passwd: true\n    sudo: []\n")
 	b.WriteString("ssh_pwauth: false\npackages:\n")
 	if err := provision.ValidatePackages(def.Packages); err != nil {
-		return "#cloud-config\n# invalid package manifest: " + err.Error() + "\n"
+		return "#cloud-config\n# invalid package manifest: " + err.Error() + "\n", nil
 	}
-	for _, pkg := range def.Packages {
+	firewallArgs := optionalPort(def.OrcaPort)
+	firewallRules, err := FirewallRulesChecked(def.AllowedCIDRs, firewallArgs...)
+	if err != nil {
+		return "", fmt.Errorf("generate guest firewall: %w", err)
+	}
+	packages := append([]string(nil), def.Packages...)
+	if !containsString(packages, "qemu-guest-agent") {
+		packages = append(packages, "qemu-guest-agent")
+	}
+	sort.Strings(packages)
+	for _, pkg := range packages {
 		fmt.Fprintf(&b, "  - %s\n", pkg)
 	}
+	if encodedKey != "" {
+		b.WriteString("bootcmd:\n  - [install, -d, -o, root, -g, root, -m, '0700', /etc/agent-os/keys]\n")
+	}
 	b.WriteString("write_files:\n")
-	b.WriteString("  - path: /etc/agent-os/README\n    permissions: '0644'\n    content: |\n      Managed by agent-os. Credentials are provisioned separately.\n")
-	if repositoryKeyPath != "" {
-		// This is a guest destination, never the host key content or a host
-		// path. The private key is copied only by the explicit provisioning
-		// workflow after correspondence and permission checks.
-		b.WriteString("  - path: /etc/agent-os/repository-key-source\n    permissions: '0600'\n    content: |\n      Provisioning source is operator-supplied; key material is not in cloud-init.\n")
+	b.WriteString("  - path: /etc/agent-os/README\n    permissions: '0644'\n    content: |\n      Managed by agent-os. Repository credentials use restricted guest permissions.\n")
+	if encodedKey != "" {
+		fmt.Fprintf(&b, "  - path: %s\n    owner: root:root\n    permissions: '0600'\n    defer: true\n    encoding: b64\n    content: |\n      %s\n", strconv.Quote(guestKeyPath), encodedKey)
 	}
 	b.WriteString("  - path: /etc/systemd/system/orca.service\n    permissions: '0644'\n    content: |\n")
 	appendIndented(&b, OrcaSystemdUnit(def.OrcaPort, def.BindAddress, def.PairingAddress), "      ")
 	b.WriteString("  - path: /usr/local/libexec/agent-os-provision-agent-instructions\n    permissions: '0700'\n    content: |\n")
 	appendIndented(&b, provision.AgentInstructionsScript(def.AgentInstructions), "      ")
 	b.WriteString("  - path: /etc/agent-os/firewall.rules\n    permissions: '0600'\n    content: |\n")
-	appendIndented(&b, strings.Join(FirewallRules(def.AllowedCIDRs, def.OrcaPort), "\n"), "      ")
+	appendIndented(&b, strings.Join(firewallRules, "\n"), "      ")
 	orcaInstallScript, err := releases.OrcaInstallScript(def.Architecture)
 	if err != nil {
-		return "#cloud-config\n# invalid Orca architecture: " + err.Error() + "\n"
+		return "", err
 	}
 	b.WriteString("  - path: /usr/local/libexec/agent-os-install-orca\n    permissions: '0700'\n    content: |\n")
 	appendIndented(&b, orcaInstallScript, "      ")
@@ -219,8 +286,61 @@ func CloudInit(def VMDefinition, repositoryKeyPath string) string {
 	b.WriteString("  - [bash, /usr/local/libexec/agent-os-install-orca]\n")
 	b.WriteString("  - [systemctl, daemon-reload]\n")
 	b.WriteString("  - [systemctl, enable, --now, agent-os-firewall.service]\n")
+	b.WriteString("  - [systemctl, enable, --now, qemu-guest-agent.service]\n")
 	b.WriteString("  - [systemctl, enable, --now, orca.service]\n")
-	return b.String()
+	return b.String(), nil
+}
+
+func repositoryKeyData(repositoryKeyPath string) (guestPath, encoded string, err error) {
+	if strings.TrimSpace(repositoryKeyPath) == "" {
+		return "", "", nil
+	}
+	data, err := credentials.ReadPrivateKey(repositoryKeyPath)
+	if err != nil {
+		return "", "", err
+	}
+	return credentials.GuestKeyPath(repositoryKeyPath), base64.StdEncoding.EncodeToString(data), nil
+}
+
+func repositoryKeyProvisionScript(repositoryKeyPath string) (string, error) {
+	guestPath, encoded, err := repositoryKeyData(repositoryKeyPath)
+	if err != nil {
+		return "", err
+	}
+	if encoded == "" {
+		return "", nil
+	}
+
+	const encodedPath = "/run/agent-os-repository-key.b64"
+	var b strings.Builder
+	b.WriteString("umask 077\n")
+	b.WriteString("install -d -o root -g root -m 0700 /etc/agent-os/keys\n")
+	fmt.Fprintf(&b, "cat > %s <<'AGENT_OS_REPOSITORY_KEY'\n", shellQuote(encodedPath))
+	b.WriteString(encoded + "\nAGENT_OS_REPOSITORY_KEY\n")
+	fmt.Fprintf(&b, "/usr/bin/base64 --decode %s > %s\n", shellQuote(encodedPath), shellQuote(guestPath))
+	fmt.Fprintf(&b, "chown root:root %s\nchmod 0600 %s\n", shellQuote(guestPath), shellQuote(guestPath))
+	fmt.Fprintf(&b, "rm -f -- %s\n", shellQuote(encodedPath))
+	return strings.TrimSuffix(b.String(), "\n"), nil
+}
+
+func containsString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func optionalPort(port int) []int {
+	if port == 0 {
+		return nil
+	}
+	return []int{port}
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func appendIndented(b *strings.Builder, value, prefix string) {
@@ -299,28 +419,93 @@ func LimaPortForward(c model.Config) string {
 }
 
 func FirewallRules(allowedCIDRs []string, orcaPort ...int) []string {
-	rules := []string{
-		"nft add table inet agent_os",
-		"nft add chain inet agent_os forward { type filter hook forward priority 0; policy drop; }",
-		"nft add rule inet agent_os forward ct state established,related accept",
-		"nft add chain inet agent_os output { type filter hook output priority 0; policy drop; }",
-		"nft add rule inet agent_os output ct state established,related accept",
-		"nft add rule inet agent_os output oifname \"eth0\" udp dport { 53, 67, 68, 123 } accept",
-		"nft add rule inet agent_os output oifname \"eth0\" tcp dport 53 accept",
-		"nft add rule inet agent_os output oifname \"eth0\" ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } accept",
-		"nft add rule inet agent_os output oifname \"eth0\" ip6 daddr != { ::1/128, fc00::/7, fe80::/10 } accept",
-		"nft add rule inet agent_os output oifname \"eth0\" ip6 daddr fc00::/7 drop",
-		"nft add chain inet agent_os input { type filter hook input priority 0; policy drop; }",
+	// Preserve the historical best-effort API: an omitted or out-of-range
+	// optional port simply omits the ingress rule. Artifact generators use the
+	// checked form below, so invalid configuration still fails creation.
+	if len(orcaPort) > 1 {
+		orcaPort = orcaPort[:1]
 	}
-	if len(orcaPort) > 0 && orcaPort[0] >= 1 && orcaPort[0] <= 65535 {
-		rules = append(rules, fmt.Sprintf("nft add rule inet agent_os input iifname \"eth0\" tcp dport %d accept", orcaPort[0]))
+	if len(orcaPort) == 1 && (orcaPort[0] < 1 || orcaPort[0] > 65535) {
+		orcaPort = nil
 	}
-	for _, cidr := range allowedCIDRs {
-		if strings.TrimSpace(cidr) != "" {
-			rules = append(rules, fmt.Sprintf("nft add rule inet agent_os output oifname \"eth0\" ip daddr %s accept", cidr))
-		}
+	rules, err := firewallRules(allowedCIDRs, orcaPort, false)
+	if err != nil {
+		return nil
 	}
 	return rules
+}
+
+// FirewallRulesChecked returns an nftables ruleset in the native script
+// format accepted by `nft -f`. It rejects invalid ports or CIDRs so callers
+// that are creating guest artifacts cannot accidentally interpolate arbitrary
+// text into a firewall rule.
+func FirewallRulesChecked(allowedCIDRs []string, orcaPort ...int) ([]string, error) {
+	return firewallRules(allowedCIDRs, orcaPort, true)
+}
+
+func firewallRules(allowedCIDRs []string, orcaPort []int, rejectInvalidCIDR bool) ([]string, error) {
+	if len(orcaPort) > 1 {
+		return nil, fmt.Errorf("Orca port may be specified at most once")
+	}
+	port := 0
+	if len(orcaPort) == 1 {
+		port = orcaPort[0]
+		if port < 1 || port > 65535 {
+			return nil, fmt.Errorf("invalid Orca port %d", port)
+		}
+	}
+
+	cidrs := make([]string, 0, len(allowedCIDRs))
+	seen := make(map[string]struct{}, len(allowedCIDRs))
+	for _, raw := range allowedCIDRs {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
+		_, network, err := net.ParseCIDR(value)
+		if err != nil {
+			if rejectInvalidCIDR {
+				return nil, fmt.Errorf("invalid allowed CIDR %q", value)
+			}
+			continue
+		}
+		value = network.String()
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		cidrs = append(cidrs, value)
+	}
+	sort.Strings(cidrs)
+
+	rules := []string{
+		"add table inet agent_os",
+		"add chain inet agent_os forward { type filter hook forward priority 0; policy drop; }",
+		"add rule inet agent_os forward ct state established,related accept",
+		"add chain inet agent_os output { type filter hook output priority 0; policy drop; }",
+		"add rule inet agent_os output ct state established,related accept",
+		"add rule inet agent_os output oifname != \"lo\" udp dport { 53, 67, 68, 123 } accept",
+		"add rule inet agent_os output oifname != \"lo\" tcp dport 53 accept",
+		"add rule inet agent_os output oifname != \"lo\" ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } accept",
+		"add rule inet agent_os output oifname != \"lo\" ip6 daddr != { ::1/128, fc00::/7, fe80::/10 } accept",
+		"add rule inet agent_os output oifname != \"lo\" ip6 daddr fc00::/7 drop",
+		"add rule inet agent_os output oifname \"lo\" accept",
+		"add chain inet agent_os input { type filter hook input priority 0; policy drop; }",
+		"add rule inet agent_os input ct state established,related accept",
+		"add rule inet agent_os input iifname \"lo\" accept",
+		"add rule inet agent_os input iifname != \"lo\" udp sport 67 udp dport 68 accept",
+	}
+	if port != 0 {
+		rules = append(rules, fmt.Sprintf("add rule inet agent_os input iifname != \"lo\" tcp dport %d accept", port))
+	}
+	for _, cidr := range cidrs {
+		addressFamily := "ip"
+		if strings.Contains(cidr, ":") {
+			addressFamily = "ip6"
+		}
+		rules = append(rules, fmt.Sprintf("add rule inet agent_os output oifname != \"lo\" %s daddr %s accept", addressFamily, cidr))
+	}
+	return rules, nil
 }
 
 // LibvirtGuestAddress and LibvirtMACAddress provide a stable DHCP reservation
@@ -425,8 +610,10 @@ Before=network.target orca.service
 
 [Service]
 Type=oneshot
+ExecStartPre=-/usr/sbin/nft delete table inet agent_os
 ExecStart=/usr/sbin/nft -f /etc/agent-os/firewall.rules
 RemainAfterExit=yes
+ExecReload=-/usr/sbin/nft delete table inet agent_os
 ExecReload=/usr/sbin/nft -f /etc/agent-os/firewall.rules
 
 [Install]

@@ -1,16 +1,73 @@
 package backend
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gjpin/agent-os/internal/artifacts"
 	"github.com/gjpin/agent-os/internal/execx"
 	"github.com/gjpin/agent-os/internal/model"
 	"github.com/gjpin/agent-os/internal/provision"
 )
+
+type backendScriptedRunner struct {
+	Calls   []execx.Invocation
+	Inputs  []string
+	Outputs []string
+	Errors  []error
+}
+
+func (r *backendScriptedRunner) Run(_ context.Context, name string, args []string, stdin io.Reader, stdout, _ io.Writer) error {
+	r.Calls = append(r.Calls, execx.Invocation{Name: name, Args: append([]string(nil), args...)})
+	var input bytes.Buffer
+	if stdin != nil {
+		_, _ = io.Copy(&input, stdin)
+	}
+	r.Inputs = append(r.Inputs, input.String())
+	index := len(r.Calls) - 1
+	if index < len(r.Outputs) && stdout != nil {
+		_, _ = io.WriteString(stdout, r.Outputs[index])
+	}
+	if index < len(r.Errors) {
+		return r.Errors[index]
+	}
+	return nil
+}
+
+type guestAgentTestRunner struct {
+	Calls []execx.Invocation
+}
+
+func (r *guestAgentTestRunner) Run(_ context.Context, name string, args []string, _ io.Reader, stdout, _ io.Writer) error {
+	r.Calls = append(r.Calls, execx.Invocation{Name: name, Args: append([]string(nil), args...)})
+	if name != "virsh" || len(args) == 0 {
+		return errors.New("unexpected guest-agent invocation")
+	}
+	var request struct {
+		Execute   string          `json:"execute"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if err := json.Unmarshal([]byte(args[len(args)-1]), &request); err != nil {
+		return err
+	}
+	switch request.Execute {
+	case "guest-exec":
+		_, _ = io.WriteString(stdout, `{"return":{"pid":42}}`)
+	case "guest-exec-status":
+		_, _ = io.WriteString(stdout, `{"return":{"exited":true,"exitcode":0,"out-data":"b3V0Cg==","err-data":"ZXJyCg=="}}`)
+	default:
+		return errors.New("unexpected guest-agent request")
+	}
+	return nil
+}
 
 func TestLimaUsesArgumentArrays(t *testing.T) {
 	runner := &execx.RecordingRunner{}
@@ -47,6 +104,353 @@ func TestLibvirtForwardingUsesWireGuardInterface(t *testing.T) {
 	last := runner.Calls[len(runner.Calls)-1]
 	if last.Name != "sudo" || len(last.Args) != 3 || last.Args[0] != "nft" || last.Args[1] != "-f" || last.Args[2] != "-" {
 		t.Fatalf("nft rules were not installed: %+v", last)
+	}
+}
+
+func TestLibvirtWireGuardForwardingUsesGuestTarget(t *testing.T) {
+	runner := &backendScriptedRunner{}
+	c := model.DefaultConfig("/state")
+	c.VMName = "wireguard-vm"
+	c.AccessMode = model.AccessWireGuard
+	c.WireGuardInterface = "wg0"
+	c.WireGuardAddress = "10.64.0.2/32"
+	provider := Libvirt{Runner: runner}
+
+	if err := provider.ConfigureForwarding(context.Background(), Spec{Config: c}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.Calls) != 5 {
+		t.Fatalf("unexpected forwarding calls: %+v", runner.Calls)
+	}
+	if runner.Calls[0].Name != "sudo" || strings.Join(runner.Calls[0].Args, " ") != "ip link show dev wg0" {
+		t.Fatalf("unexpected WireGuard check: %+v", runner.Calls[0])
+	}
+	if got := runner.Calls[3].Args; len(got) != 3 || got[0] != "sysctl" || got[1] != "-w" || got[2] != "net.ipv4.ip_forward=1" {
+		t.Fatalf("unexpected forwarding sysctl: %+v", runner.Calls[3])
+	}
+	rules := runner.Inputs[4]
+	guest := artifacts.LibvirtGuestAddress(c.VMName)
+	if !strings.Contains(rules, "ip daddr 10.64.0.2") {
+		t.Fatalf("rules omitted the host WireGuard endpoint: %s", rules)
+	}
+	if !strings.Contains(rules, "dnat to "+guest+":"+"6768") {
+		t.Fatalf("rules did not target the guest address %s: %s", guest, rules)
+	}
+	if strings.Contains(rules, "dnat to 10.64.0.2:6768") {
+		t.Fatalf("rules attempted to DNAT to the host WireGuard address: %s", rules)
+	}
+}
+
+func TestLibvirtLocalForwardingDoesNotCheckWireGuard(t *testing.T) {
+	runner := &backendScriptedRunner{}
+	c := model.DefaultConfig("/state")
+	c.VMName = "local-vm"
+	c.AccessMode = model.AccessLocal
+	provider := Libvirt{Runner: runner}
+
+	if err := provider.ConfigureForwarding(context.Background(), Spec{Config: c}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.Calls) != 4 {
+		t.Fatalf("unexpected local forwarding calls: %+v", runner.Calls)
+	}
+	for _, call := range runner.Calls {
+		if strings.Contains(strings.Join(call.Args, " "), "ip link") {
+			t.Fatalf("local forwarding checked a WireGuard interface: %+v", runner.Calls)
+		}
+	}
+	rules := runner.Inputs[len(runner.Inputs)-1]
+	guest := artifacts.LibvirtGuestAddress(c.VMName)
+	if !strings.Contains(rules, "ip daddr 127.0.0.1 tcp dport 6768 dnat to "+guest+":6768") {
+		t.Fatalf("local forwarding omitted the loopback DNAT: %s", rules)
+	}
+	if strings.Contains(rules, "iifname") || strings.Contains(rules, "10.64.") {
+		t.Fatalf("local forwarding unexpectedly contains WireGuard rules: %s", rules)
+	}
+}
+
+func TestLibvirtForwardingValidatesBeforeHostMutation(t *testing.T) {
+	runner := &backendScriptedRunner{}
+	c := model.DefaultConfig("/state")
+	c.VMName = "bad vm"
+	if err := (Libvirt{Runner: runner}).ConfigureForwarding(context.Background(), Spec{Config: c}); err == nil {
+		t.Fatal("expected invalid VM name to be rejected")
+	}
+	if len(runner.Calls) != 0 {
+		t.Fatalf("invalid forwarding config ran host commands: %+v", runner.Calls)
+	}
+}
+
+func TestLibvirtForwardingCleanupErrorsAreReturned(t *testing.T) {
+	c := model.DefaultConfig("/state")
+	c.VMName = "cleanup-vm"
+	runner := &backendScriptedRunner{Errors: []error{nil, errors.New("delete failed")}}
+	provider := Libvirt{Runner: runner}
+	if err := provider.ConfigureForwarding(context.Background(), Spec{Config: c}); err == nil || !strings.Contains(err.Error(), "remove Orca forwarding rules") {
+		t.Fatalf("expected stale forwarding cleanup error, got %v", err)
+	}
+	if len(runner.Calls) != 2 {
+		t.Fatalf("forwarding continued after cleanup failure: %+v", runner.Calls)
+	}
+
+	runner = &backendScriptedRunner{Errors: []error{nil, errors.New("delete failed")}}
+	provider = Libvirt{Runner: runner}
+	if err := provider.RemoveForwarding(context.Background(), Spec{Config: c}); err == nil || !strings.Contains(err.Error(), "remove Orca forwarding rules") {
+		t.Fatalf("expected removal error, got %v", err)
+	}
+}
+
+func TestLibvirtForwardingCleanupToleratesMissingTable(t *testing.T) {
+	c := model.DefaultConfig("/state")
+	c.VMName = "missing-table-vm"
+	runner := &backendScriptedRunner{Errors: []error{errors.New("table does not exist")}}
+	if err := (Libvirt{Runner: runner}).RemoveForwarding(context.Background(), Spec{Config: c}); err != nil {
+		t.Fatalf("missing forwarding table should be safe to remove: %v", err)
+	}
+	if len(runner.Calls) != 1 {
+		t.Fatalf("cleanup tried to delete a table that was not present: %+v", runner.Calls)
+	}
+}
+
+func TestLibvirtForwardingCleanupHonorsCancellation(t *testing.T) {
+	c := model.DefaultConfig("/state")
+	c.VMName = "cancelled-vm"
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	runner := &backendScriptedRunner{}
+	if err := (Libvirt{Runner: runner}).RemoveForwarding(ctx, Spec{Config: c}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation from forwarding cleanup, got %v", err)
+	}
+	if len(runner.Calls) != 0 {
+		t.Fatalf("cancelled cleanup ran host commands: %+v", runner.Calls)
+	}
+}
+
+func TestLibvirtCreateBindsOrcaToGuestAndAddsGuestAgent(t *testing.T) {
+	stateDir := t.TempDir()
+	c := model.DefaultConfig(stateDir)
+	c.VMName = "wireguard-create"
+	c.AccessMode = model.AccessWireGuard
+	c.WireGuardInterface = "wg0"
+	c.WireGuardAddress = "10.64.0.2/32"
+	if err := (Libvirt{}).Create(context.Background(), Spec{Config: c, Architecture: "x86_64", DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	artifactDir := filepath.Join(stateDir, "v1", "vms", c.VMName, "artifacts")
+	xmlBytes, err := os.ReadFile(filepath.Join(artifactDir, "domain.xml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	xml := string(xmlBytes)
+	if !strings.Contains(xml, `<channel type="unix">`) || strings.Count(xml, `name="org.qemu.guest_agent.0"`) != 1 {
+		t.Fatalf("libvirt XML omitted the guest-agent channel: %s", xml)
+	}
+	serviceBytes, err := os.ReadFile(filepath.Join(artifactDir, "orca.service"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	guest := artifacts.LibvirtGuestAddress(c.VMName)
+	service := string(serviceBytes)
+	if !strings.Contains(service, "ORCA_BIND_ADDRESS="+guest) || strings.Contains(service, "ORCA_BIND_ADDRESS=10.64.0.2") {
+		t.Fatalf("Orca was not bound to the guest address: %s", service)
+	}
+	if !strings.Contains(service, "--pairing-address 10.64.0.2") {
+		t.Fatalf("WireGuard forwarding endpoint was not retained as the pairing endpoint: %s", service)
+	}
+	userDataBytes, err := os.ReadFile(filepath.Join(artifactDir, "user-data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	userData := string(userDataBytes)
+	if !strings.Contains(userData, "- qemu-guest-agent") || !strings.Contains(userData, "qemu-guest-agent.service") {
+		t.Fatalf("user-data did not provision and enable qemu-guest-agent: %s", userData)
+	}
+}
+
+func TestLibvirtExecUsesGuestAgentJSONAndStreamsOutput(t *testing.T) {
+	runner := &guestAgentTestRunner{}
+	var stdout, stderr bytes.Buffer
+	input := bytes.NewBufferString("input\n")
+	if err := (Libvirt{Runner: runner}).Exec(context.Background(), "agents", []string{"printf", "hello world"}, input, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.Calls) != 2 {
+		t.Fatalf("expected guest-exec and guest-exec-status, got %+v", runner.Calls)
+	}
+	first := runner.Calls[0]
+	if first.Name != "virsh" || len(first.Args) != 7 || first.Args[0] != "--connect" || first.Args[1] != "qemu:///system" || first.Args[2] != "qemu-agent-command" || first.Args[3] != "agents" || first.Args[4] != "--timeout" || first.Args[5] != qemuGuestAgentCommandTimeout {
+		t.Fatalf("unexpected qemu-agent-command arguments: %+v", first)
+	}
+	var request struct {
+		Execute   string `json:"execute"`
+		Arguments struct {
+			Path          string   `json:"path"`
+			Args          []string `json:"arg"`
+			InputData     string   `json:"input-data"`
+			CaptureOutput bool     `json:"capture-output"`
+		} `json:"arguments"`
+	}
+	if err := json.Unmarshal([]byte(first.Args[len(first.Args)-1]), &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.Execute != "guest-exec" || request.Arguments.Path != "printf" || len(request.Arguments.Args) != 1 || request.Arguments.Args[0] != "hello world" || request.Arguments.InputData != base64.StdEncoding.EncodeToString([]byte("input\n")) || !request.Arguments.CaptureOutput {
+		t.Fatalf("unexpected guest-exec request: %+v", request)
+	}
+	if stdout.String() != "out\n" || stderr.String() != "err\n" {
+		t.Fatalf("unexpected guest output: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+
+	var status struct {
+		Execute   string `json:"execute"`
+		Arguments struct {
+			PID uint64 `json:"pid"`
+		} `json:"arguments"`
+	}
+	if err := json.Unmarshal([]byte(runner.Calls[1].Args[len(runner.Calls[1].Args)-1]), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Execute != "guest-exec-status" || status.Arguments.PID != 42 {
+		t.Fatalf("unexpected guest-exec-status request: %+v", status)
+	}
+}
+
+func TestLibvirtExecValidatesArguments(t *testing.T) {
+	runner := &guestAgentTestRunner{}
+	provider := Libvirt{Runner: runner}
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{name: "", args: []string{"true"}},
+		{name: "agents", args: nil},
+		{name: "agents", args: []string{"true\x00bad"}},
+	} {
+		if err := provider.Exec(context.Background(), test.name, test.args, nil, nil, nil); err == nil {
+			t.Errorf("Exec(%q, %q) accepted invalid arguments", test.name, test.args)
+		}
+	}
+	if len(runner.Calls) != 0 {
+		t.Fatalf("invalid guest commands ran virsh: %+v", runner.Calls)
+	}
+}
+
+func TestLibvirtSecurityPreflightRejectsExplicitlyDisabledControls(t *testing.T) {
+	if err := validateLibvirtSecurityConfig([]byte(`
+seccomp_sandbox = 1
+namespaces = [ "mount", "ipc", "uts", "net", "pid" ]
+cgroup_controllers = [ "cpu", "memory", "devices" ]
+`)); err != nil {
+		t.Fatalf("accepted valid libvirt security settings: %v", err)
+	}
+
+	for _, test := range []struct {
+		name  string
+		value string
+	}{
+		{name: "seccomp", value: "seccomp_sandbox = 0"},
+		{name: "mount namespace", value: `namespaces = [ "ipc", "uts", "net", "pid" ]`},
+		{name: "device cgroup", value: `cgroup_controllers = [ "cpu", "memory" ]`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateLibvirtSecurityConfig([]byte(test.value)); err == nil {
+				t.Fatalf("accepted disabled %s control", test.name)
+			}
+		})
+	}
+}
+
+func TestLibvirtSecurityConfigRequiresExplicitControls(t *testing.T) {
+	base := `
+seccomp_sandbox = 1
+namespaces = [ "mount" ]
+cgroup_controllers = [ "cpu", "devices" ]
+`
+	for _, test := range []struct {
+		name string
+		data string
+		want string
+	}{
+		{name: "missing seccomp", data: "namespaces = [ \"mount\" ]\ncgroup_controllers = [ \"devices\" ]", want: "seccomp"},
+		{name: "missing mount namespace", data: "seccomp_sandbox = 1\nnamespaces = []\ncgroup_controllers = [ \"devices\" ]", want: "mount namespace"},
+		{name: "missing device controller", data: "seccomp_sandbox = 1\nnamespaces = [ \"mount\" ]\ncgroup_controllers = [ \"cpu\" ]", want: "device cgroup"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateLibvirtSecurityConfig([]byte(test.data)); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expected %q error, got %v", test.want, err)
+			}
+		})
+	}
+
+	if err := validateLibvirtSecurityConfig([]byte(base)); err != nil {
+		t.Fatalf("rejected explicit security policy: %v", err)
+	}
+
+	for _, data := range []string{
+		base + `security_default_confined = 0
+`,
+		base + `security_default_confined = false
+`,
+		base + `security_driver = []
+`,
+		base + `security_driver = [ "none" ]
+`,
+	} {
+		if err := validateLibvirtSecurityConfig([]byte(data)); err == nil {
+			t.Fatalf("accepted a disabled libvirt security setting: %q", data)
+		}
+	}
+}
+
+func TestLibvirtSecurityPreflightFailsClosedWhenConfigIsMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "qemu.conf")
+	if err := libvirtSecurityPreflightAt(path); err == nil || !strings.Contains(err.Error(), "not explicit") {
+		t.Fatalf("missing libvirt security configuration was accepted: %v", err)
+	}
+}
+
+func TestLibvirtSecurityConfigParsesMultilineLists(t *testing.T) {
+	data := []byte(`
+seccomp_sandbox = 1
+namespaces = [
+  "ipc",
+  "mount"
+]
+cgroup_controllers = [
+  "cpu",
+  "devices"
+]
+`)
+	if err := validateLibvirtSecurityConfig(data); err != nil {
+		t.Fatalf("rejected multiline security policy: %v", err)
+	}
+}
+
+func TestLibvirtSecurityTranslationRequiresSandboxPolicy(t *testing.T) {
+	runner := &backendScriptedRunner{Outputs: []string{`/usr/bin/qemu-system-x86_64 -sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny`}}
+	provider := Libvirt{Runner: runner}
+	if err := provider.verifyLibvirtSecurityTranslation(context.Background(), "/state/domain.xml"); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.Calls) != 1 || runner.Calls[0].Name != "virsh" || !strings.Contains(strings.Join(runner.Calls[0].Args, " "), "domxml-to-native qemu-argv /state/domain.xml") {
+		t.Fatalf("unexpected libvirt security verification call: %+v", runner.Calls)
+	}
+
+	runner = &backendScriptedRunner{Outputs: []string{"/usr/bin/qemu-system-x86_64"}}
+	if err := (Libvirt{Runner: runner}).verifyLibvirtSecurityTranslation(context.Background(), "/state/domain.xml"); err == nil {
+		t.Fatal("accepted a QEMU translation without the sandbox policy")
+	}
+}
+
+func TestLibvirtStartVerifiesDefinedDomainSecurity(t *testing.T) {
+	// Start performs the host qemu.conf preflight before reaching virsh, so the
+	// domain-translation helper is tested directly with the same runner shape.
+	runner := &backendScriptedRunner{Outputs: []string{`/usr/bin/qemu-system-x86_64 -sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny`}}
+	provider := Libvirt{Runner: runner}
+	if err := provider.verifyLibvirtDomainSecurityTranslation(context.Background(), "agents"); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.Calls) != 1 || !strings.Contains(strings.Join(runner.Calls[0].Args, " "), "domxml-to-native qemu-argv --domain agents") {
+		t.Fatalf("unexpected defined-domain security verification call: %+v", runner.Calls)
 	}
 }
 

@@ -1,16 +1,17 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 
-	"github.com/spf13/cobra"
 	"github.com/gjpin/agent-os/internal/artifacts"
 	"github.com/gjpin/agent-os/internal/backend"
 	"github.com/gjpin/agent-os/internal/config"
@@ -19,6 +20,7 @@ import (
 	"github.com/gjpin/agent-os/internal/model"
 	"github.com/gjpin/agent-os/internal/provision"
 	"github.com/gjpin/agent-os/internal/state"
+	"github.com/spf13/cobra"
 )
 
 func (a *App) setupHostCommand() *cobra.Command {
@@ -32,6 +34,9 @@ func (a *App) setupHostCommand() *cobra.Command {
 			plan := setupPlan(info)
 			if !apply {
 				fmt.Fprintf(a.Out, "host: %s/%s\nprovider: %s\n", info.OS, info.Architecture, info.Provider)
+				if info.OS == "linux" {
+					fmt.Fprintf(a.Out, "distribution: %s\n", info.Distribution)
+				}
 				for _, item := range plan {
 					fmt.Fprintf(a.Out, "- %s\n", item)
 				}
@@ -52,11 +57,18 @@ func (a *App) setupHostCommand() *cobra.Command {
 }
 
 func setupPlan(info host.Info) []string {
+	family := distributionFamily(info)
 	switch {
 	case info.OS == "darwin" && info.Architecture == "arm64":
 		return []string{"require Lima", "if Homebrew is missing, confirm and install it from the official source", "brew install lima"}
-	case info.OS == "linux":
-		return []string{"detect Fedora or Ubuntu", "install the distribution virtualization packages", "enable/use unprivileged QEMU with libvirt"}
+	case info.OS == "linux" && family != "":
+		packages := prerequisitePackageNames(family)
+		return []string{
+			fmt.Sprintf("probe %s virtualization commands for %s", family, info.Distribution),
+			"install only missing prerequisites: " + strings.Join(packages, ", "),
+			"append missing libvirt QEMU hardening settings and restart the QEMU driver",
+			"enable/use unprivileged QEMU with libvirt",
+		}
 	default:
 		return []string{"unsupported host: no changes are available"}
 	}
@@ -64,7 +76,11 @@ func setupPlan(info host.Info) []string {
 
 func (a *App) applySetup(ctx context.Context, info host.Info, plan []string) error {
 	if info.OS == "darwin" && info.Architecture == "arm64" {
-		if _, err := exec.LookPath("brew"); err != nil {
+		if a.commandAvailable("limactl") {
+			fmt.Fprintln(a.Out, "host prerequisites are already installed")
+			return nil
+		}
+		if !a.commandAvailable("brew") {
 			return a.installHomebrew(ctx)
 		}
 		return a.Runner.Run(ctx, "brew", []string{"install", "lima"}, nil, a.Out, a.Err)
@@ -72,18 +88,241 @@ func (a *App) applySetup(ctx context.Context, info host.Info, plan []string) err
 	if info.OS != "linux" {
 		return fmt.Errorf("cannot configure unsupported host %s/%s", info.OS, info.Architecture)
 	}
-	distro := linuxDistro()
-	var executable string
-	var args []string
-	switch distro {
-	case "fedora", "rhel", "centos":
-		executable, args = "sudo", []string{"dnf", "install", "-y", "@virtualization", "virt-install", "libvirt-client", "libvirt-daemon-config-network", "qemu-kvm", "qemu-img", "cloud-utils", "nftables"}
-	case "ubuntu", "debian":
-		executable, args = "sudo", []string{"apt-get", "install", "-y", "qemu-system-x86", "qemu-utils", "libvirt-daemon-system", "libvirt-daemon-driver-qemu", "libvirt-clients", "virtinst", "ovmf", "bridge-utils", "dnsmasq", "cloud-image-utils", "nftables"}
-	default:
-		return fmt.Errorf("unsupported Linux distribution; prerequisites would be: %s", strings.Join(plan, "; "))
+	family := distributionFamily(info)
+	if family == "" {
+		if strings.TrimSpace(info.Distribution) == "" {
+			return fmt.Errorf("unable to detect a supported Linux distribution; supported distributions are Fedora and Ubuntu")
+		}
+		return fmt.Errorf("unsupported Linux distribution %q; supported distributions are Fedora and Ubuntu", info.Distribution)
 	}
-	return a.Runner.Run(ctx, executable, args, nil, a.Out, a.Err)
+	missing := a.missingPrerequisitePackages(family)
+	if len(missing) == 0 {
+		fmt.Fprintln(a.Out, "host prerequisites are already installed")
+	} else {
+		// Keep the plan parameter for compatibility with the existing command
+		// flow; the actual package list is derived from fresh probes above.
+		_ = plan
+		var executable string
+		var args []string
+		switch family {
+		case "fedora":
+			executable, args = "sudo", append([]string{"dnf", "install", "-y"}, missing...)
+		case "ubuntu":
+			executable, args = "sudo", append([]string{"apt-get", "install", "-y"}, missing...)
+		default:
+			return fmt.Errorf("unsupported Linux distribution %q", info.Distribution)
+		}
+		if err := a.Runner.Run(ctx, executable, args, nil, a.Out, a.Err); err != nil {
+			return err
+		}
+	}
+
+	changed, err := a.ensureLibvirtQEMUHardening(ctx)
+	if err != nil {
+		return err
+	}
+	if changed {
+		fmt.Fprintln(a.Out, "configured missing libvirt QEMU hardening settings")
+	} else {
+		fmt.Fprintln(a.Out, "libvirt QEMU hardening settings are already configured")
+	}
+	return nil
+}
+
+const libvirtQEMUConfigPath = "/etc/libvirt/qemu.conf"
+
+type libvirtQEMUSetting struct {
+	key   string
+	value string
+}
+
+var requiredLibvirtQEMUSettings = []libvirtQEMUSetting{
+	{key: "seccomp_sandbox", value: "1"},
+	{key: "namespaces", value: `[ "mount" ]`},
+	{key: "cgroup_controllers", value: `[ "devices" ]`},
+}
+
+// ensureLibvirtQEMUHardening appends only assignments whose keys are absent
+// from qemu.conf. Existing values, including explicitly insecure values, are
+// never rewritten; the backend will reject those values during create/start.
+func (a *App) ensureLibvirtQEMUHardening(ctx context.Context) (bool, error) {
+	readFile := a.ReadFile
+	if readFile == nil {
+		readFile = os.ReadFile
+	}
+	data, err := readFile(libvirtQEMUConfigPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("read libvirt QEMU configuration %s: %w", libvirtQEMUConfigPath, err)
+	}
+	missing := missingLibvirtQEMUSettings(data)
+	if len(missing) == 0 {
+		return false, nil
+	}
+
+	var block strings.Builder
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		block.WriteByte('\n')
+	}
+	for _, setting := range missing {
+		fmt.Fprintf(&block, "%s = %s\n", setting.key, setting.value)
+	}
+	if err := a.Runner.Run(ctx, "sudo", []string{"tee", "-a", libvirtQEMUConfigPath}, strings.NewReader(block.String()), io.Discard, a.Err); err != nil {
+		return false, fmt.Errorf("append libvirt QEMU hardening settings: %w", err)
+	}
+	if err := a.restartLibvirtQEMU(ctx); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func missingLibvirtQEMUSettings(data []byte) []libvirtQEMUSetting {
+	present := make(map[string]bool, len(requiredLibvirtQEMUSettings))
+	for _, rawLine := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		left, _, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key := strings.TrimSpace(left)
+		for _, setting := range requiredLibvirtQEMUSettings {
+			if key == setting.key {
+				present[key] = true
+			}
+		}
+	}
+
+	missing := make([]libvirtQEMUSetting, 0, len(requiredLibvirtQEMUSettings))
+	for _, setting := range requiredLibvirtQEMUSettings {
+		if !present[setting.key] {
+			missing = append(missing, setting)
+		}
+	}
+	return missing
+}
+
+func (a *App) restartLibvirtQEMU(ctx context.Context) error {
+	for _, service := range []string{"virtqemud.service", "libvirtd.service"} {
+		var state bytes.Buffer
+		if err := a.Runner.Run(ctx, "sudo", []string{"systemctl", "show", "--property=LoadState", "--value", service}, nil, &state, io.Discard); err != nil {
+			continue
+		}
+		if strings.TrimSpace(state.String()) != "loaded" {
+			continue
+		}
+		if err := a.Runner.Run(ctx, "sudo", []string{"systemctl", "restart", service}, nil, a.Out, a.Err); err != nil {
+			return fmt.Errorf("restart libvirt QEMU driver %s: %w", service, err)
+		}
+		return nil
+	}
+	return errors.New("could not find a systemd libvirt QEMU service (tried virtqemud.service and libvirtd.service)")
+}
+
+func distributionFamily(info host.Info) string {
+	return host.DistributionFamily(info.Distribution)
+}
+
+type prerequisite struct {
+	packageName string
+	probes      []string
+	anyProbe    bool
+}
+
+func prerequisitesFor(distribution string) []prerequisite {
+	distribution = host.DistributionFamily(distribution)
+	switch strings.ToLower(strings.TrimSpace(distribution)) {
+	case "fedora":
+		return []prerequisite{
+			{packageName: "@virtualization", probes: []string{"virsh", "virt-install", "qemu-system-x86_64"}},
+			{packageName: "qemu-img", probes: []string{"qemu-img"}},
+			{packageName: "libvirt-daemon-config-network", probes: []string{"virtnetworkd", "libvirtd"}, anyProbe: true},
+			{packageName: "cloud-utils", probes: []string{"cloud-localds"}},
+			{packageName: "nftables", probes: []string{"nft"}},
+		}
+	case "ubuntu":
+		return []prerequisite{
+			// Ubuntu's qemu-system meta-package is intentional: qemu-system-x86
+			// is an implementation package and is not the requested interface.
+			{packageName: "qemu-system", probes: []string{"qemu-system-x86_64"}},
+			{packageName: "qemu-utils", probes: []string{"qemu-img"}},
+			{packageName: "libvirt-daemon-system", probes: []string{"libvirtd", "virtqemud"}, anyProbe: true},
+			{packageName: "libvirt-daemon-driver-qemu", probes: []string{"virtqemud"}},
+			{packageName: "libvirt-clients", probes: []string{"virsh"}},
+			{packageName: "virtinst", probes: []string{"virt-install"}},
+			{packageName: "ovmf", probes: []string{"/usr/share/OVMF/OVMF_CODE.fd"}},
+			{packageName: "bridge-utils", probes: []string{"brctl"}},
+			{packageName: "dnsmasq", probes: []string{"dnsmasq"}},
+			{packageName: "cloud-image-utils", probes: []string{"cloud-localds"}},
+			{packageName: "nftables", probes: []string{"nft"}},
+		}
+	default:
+		return nil
+	}
+}
+
+func prerequisitePackageNames(distribution string) []string {
+	requirements := prerequisitesFor(distribution)
+	names := make([]string, 0, len(requirements))
+	for _, requirement := range requirements {
+		names = append(names, requirement.packageName)
+	}
+	return names
+}
+
+func (a *App) commandAvailable(name string) bool {
+	lookup := a.LookPath
+	if lookup == nil {
+		lookup = exec.LookPath
+	}
+	_, err := lookup(name)
+	return err == nil
+}
+
+func (a *App) pathAvailable(path string) bool {
+	if a.PathExists != nil {
+		return a.PathExists(path)
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func (a *App) probeAvailable(name string) bool {
+	if strings.ContainsRune(name, '/') {
+		return a.pathAvailable(name)
+	}
+	return a.commandAvailable(name)
+}
+
+func (a *App) prerequisiteInstalled(requirement prerequisite) bool {
+	if len(requirement.probes) == 0 {
+		return false
+	}
+	if requirement.anyProbe {
+		for _, probe := range requirement.probes {
+			if a.probeAvailable(probe) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, probe := range requirement.probes {
+		if !a.probeAvailable(probe) {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *App) missingPrerequisitePackages(distribution string) []string {
+	missing := make([]string, 0)
+	for _, requirement := range prerequisitesFor(distribution) {
+		if !a.prerequisiteInstalled(requirement) {
+			missing = append(missing, requirement.packageName)
+		}
+	}
+	return missing
 }
 
 func (a *App) installHomebrew(ctx context.Context) error {
@@ -105,19 +344,6 @@ func (a *App) installHomebrew(ctx context.Context) error {
 		return fmt.Errorf("run the official Homebrew installer: %w", err)
 	}
 	return a.Runner.Run(ctx, "brew", []string{"install", "lima"}, nil, a.Out, a.Err)
-}
-
-func linuxDistro() string {
-	data, err := os.ReadFile("/etc/os-release")
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, "ID=") {
-			return strings.Trim(strings.TrimPrefix(line, "ID="), "\"")
-		}
-	}
-	return ""
 }
 
 func (a *App) createCommand() *cobra.Command {

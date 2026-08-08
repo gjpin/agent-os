@@ -1,7 +1,6 @@
 package config
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -10,9 +9,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gjpin/agent-os/internal/model"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
-	"github.com/gjpin/agent-os/internal/model"
 )
 
 const (
@@ -47,9 +46,13 @@ type LoadOptions struct {
 	FlagValues         map[string]any
 	EnvLookup          func(string) (string, bool)
 	PromptRequired     bool
-	PromptIn           io.Reader
-	PromptOut          io.Writer
-	IsTTY              bool
+	// PromptFields names fields that should be collected during an
+	// interactive create flow when they are still at their built-in default.
+	// Values supplied by flags, the environment, or a config file always win.
+	PromptFields []string
+	PromptIn     io.Reader
+	PromptOut    io.Writer
+	IsTTY        bool
 }
 
 type Source string
@@ -158,23 +161,9 @@ func Load(opts LoadOptions) (Resolved, error) {
 		Sources:     make(map[string]Source, len(documentedEnv)),
 		Config:      readConfig(v),
 	}
-	if opts.PromptRequired && opts.IsTTY && result.Config.AccessMode == model.AccessWireGuard {
-		promptReader := bufio.NewReader(opts.PromptIn)
-		if result.Config.WireGuardInterface == "" {
-			value, err := promptReaderValue(promptReader, opts.PromptOut, "WireGuard interface")
-			if err != nil {
-				return Resolved{}, err
-			}
-			result.Config.WireGuardInterface = value
-			result.Sources["wireguard.interface"] = SourcePrompt
-		}
-		if result.Config.WireGuardAddress == "" {
-			value, err := promptReaderValue(promptReader, opts.PromptOut, "WireGuard address")
-			if err != nil {
-				return Resolved{}, err
-			}
-			result.Config.WireGuardAddress = value
-			result.Sources["wireguard.address"] = SourcePrompt
+	if opts.PromptRequired {
+		if err := promptCreateFields(&result, opts, env, configFound, configPath, v); err != nil {
+			return Resolved{}, err
 		}
 	}
 	for key := range documentedEnv {
@@ -186,6 +175,130 @@ func Load(opts LoadOptions) (Resolved, error) {
 		return Resolved{}, err
 	}
 	return result, nil
+}
+
+func promptCreateFields(result *Resolved, opts LoadOptions, env func(string) (string, bool), configFound bool, configPath string, v *viper.Viper) error {
+	fields := append([]string(nil), opts.PromptFields...)
+	// Preserve the original behavior for callers that request interactive
+	// loading without naming create fields: WireGuard details are required when
+	// WireGuard access was selected explicitly.
+	if len(fields) == 0 && result.Config.AccessMode == model.AccessWireGuard {
+		fields = []string{"wireguard.interface", "wireguard.address"}
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+
+	for _, field := range fields {
+		if promptSource(field, opts, env, configFound, configPath, v) != SourceDefault {
+			continue
+		}
+		if !opts.IsTTY {
+			return requiredPromptError(promptLabel(field))
+		}
+	}
+	if !opts.IsTTY {
+		return nil
+	}
+	if opts.PromptIn == nil {
+		return errors.New("interactive configuration requires a readable TTY")
+	}
+
+	for _, field := range fields {
+		if promptSource(field, opts, env, configFound, configPath, v) != SourceDefault {
+			continue
+		}
+		value, err := promptField(opts.PromptIn, opts.PromptOut, field, promptDefault(result.Config, field))
+		if err != nil {
+			return err
+		}
+		if err := setPromptedField(&result.Config, field, value); err != nil {
+			return err
+		}
+		result.Sources[field] = SourcePrompt
+	}
+
+	// Access mode may have been selected by the prompt. WireGuard's host
+	// endpoint is then collected only when it was not already explicit.
+	if result.Config.AccessMode == model.AccessWireGuard {
+		for _, field := range []string{"wireguard.interface", "wireguard.address"} {
+			if result.Sources[field] == SourcePrompt {
+				continue
+			}
+			if promptSource(field, opts, env, configFound, configPath, v) != SourceDefault {
+				continue
+			}
+			value, err := promptField(opts.PromptIn, opts.PromptOut, field, "")
+			if err != nil {
+				return err
+			}
+			if err := setPromptedField(&result.Config, field, value); err != nil {
+				return err
+			}
+			result.Sources[field] = SourcePrompt
+		}
+	}
+	return nil
+}
+
+func promptSource(key string, opts LoadOptions, env func(string) (string, bool), configFound bool, configPath string, v *viper.Viper) Source {
+	return sourceFor(key, opts, env, configFound, configPath, v)
+}
+
+func requiredPromptError(label string) error {
+	return fmt.Errorf("%s is required; provide it with a flag, environment variable, or config file, or run this command on a TTY", label)
+}
+
+func promptLabel(field string) string {
+	switch field {
+	case "vm.name":
+		return "VM name"
+	case "access.mode":
+		return "access mode (local or wireguard)"
+	case "orca.port":
+		return "Orca/WireGuard TCP port"
+	case "wireguard.interface":
+		return "WireGuard interface"
+	case "wireguard.address":
+		return "WireGuard address"
+	default:
+		return field
+	}
+}
+
+func promptDefault(c model.Config, field string) string {
+	switch field {
+	case "vm.name":
+		return c.VMName
+	case "access.mode":
+		return string(c.AccessMode)
+	case "orca.port":
+		return strconv.Itoa(c.OrcaPort)
+	default:
+		return ""
+	}
+}
+
+func setPromptedField(c *model.Config, field, value string) error {
+	switch field {
+	case "vm.name":
+		c.VMName = value
+	case "access.mode":
+		c.AccessMode = model.AccessMode(value)
+	case "orca.port":
+		port, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("Orca port must be a number: %w", err)
+		}
+		c.OrcaPort = port
+	case "wireguard.interface":
+		c.WireGuardInterface = value
+	case "wireguard.address":
+		c.WireGuardAddress = value
+	default:
+		return fmt.Errorf("unsupported interactive configuration field %q", field)
+	}
+	return nil
 }
 
 func setDefaults(v *viper.Viper, c model.Config) {
@@ -379,7 +492,7 @@ func writeAtomic(path string, contents []byte, mode os.FileMode) error {
 // terminal. It deliberately never writes the answer to Viper or a config file.
 func PromptRequired(in io.Reader, out io.Writer, isTTY bool, label string) (string, error) {
 	if !isTTY {
-		return "", fmt.Errorf("%s is required; provide it through the command's interactive prompt on a TTY", label)
+		return "", requiredPromptError(label)
 	}
 	if in == nil {
 		return "", fmt.Errorf("%s is required; interactive input is unavailable", label)
@@ -390,7 +503,7 @@ func PromptRequired(in io.Reader, out io.Writer, isTTY bool, label string) (stri
 	if _, err := fmt.Fprintf(out, "%s: ", label); err != nil {
 		return "", err
 	}
-	line, err := bufio.NewReader(in).ReadString('\n')
+	line, err := readPromptLine(in)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", err
 	}
@@ -401,22 +514,46 @@ func PromptRequired(in io.Reader, out io.Writer, isTTY bool, label string) (stri
 	return line, nil
 }
 
-func promptReaderValue(reader *bufio.Reader, out io.Writer, label string) (string, error) {
+func promptField(in io.Reader, out io.Writer, field, defaultValue string) (string, error) {
 	if out == nil {
 		out = io.Discard
+	}
+	label := promptLabel(field)
+	if defaultValue != "" {
+		label = fmt.Sprintf("%s [%s]", label, defaultValue)
 	}
 	if _, err := fmt.Fprintf(out, "%s: ", label); err != nil {
 		return "", err
 	}
-	line, err := reader.ReadString('\n')
+	line, err := readPromptLine(in)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", err
 	}
 	line = strings.TrimSpace(line)
 	if line == "" {
-		return "", fmt.Errorf("%s is required", label)
+		if defaultValue != "" {
+			return defaultValue, nil
+		}
+		return "", fmt.Errorf("%s is required", promptLabel(field))
 	}
 	return line, nil
+}
+
+func readPromptLine(in io.Reader) (string, error) {
+	var line strings.Builder
+	var one [1]byte
+	for {
+		n, err := in.Read(one[:])
+		if n > 0 {
+			if one[0] == '\n' {
+				return line.String(), nil
+			}
+			line.WriteByte(one[0])
+		}
+		if err != nil {
+			return line.String(), err
+		}
+	}
 }
 
 // BindChangedFlags copies only flags explicitly supplied by the user. A
