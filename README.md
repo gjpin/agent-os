@@ -16,6 +16,9 @@ The project is intentionally conservative about trust boundaries:
 - host commands use argument arrays and contexts, never a shell command string;
 - Fedora Server and Orca RPM inputs are pinned to published SHA-256 digests
   before guest installation;
+- `internal/instructions/AGENTS.md` is embedded in the release binary and
+  provisioned as `/home/agent/.agent-os/AGENTS.md`, with agent-specific
+  instruction paths linked to that canonical file;
 - `create --dry-run` generates provider artifacts without touching libvirt or
   Lima; normal create/start/stop/destroy operations are explicit.
 
@@ -33,7 +36,10 @@ go run . completion zsh > ~/.zfunc/_agent-os
 `setup-host --apply --yes`; on macOS it will not run a Homebrew installer
 implicitly. `destroy` and `upgrade` also require `--yes` or an interactive
 confirmation. `auth codex` performs login inside the VM and never copies a host
-authentication database.
+authentication database. VMs created before shared agent instructions were
+added must be recreated to receive them. If
+`internal/instructions/AGENTS.md` changes, rebuild the `agent-os` binary before
+creating new VMs.
 
 The release pipeline publishes only `linux/amd64` and `darwin/arm64` binaries,
 with SHA-256 checksums. `install.sh` downloads into a mode-0700 temporary

@@ -154,7 +154,7 @@ func (a *App) createCommand() *cobra.Command {
 				if err := store.Save(value); err != nil {
 					return err
 				}
-				err := p.Create(cmd.Context(), backend.Spec{Config: c, Architecture: architectureForHost(), DryRun: dryRun})
+				err := p.Create(cmd.Context(), a.backendSpec(c, dryRun))
 				if err != nil {
 					value.Lifecycle = model.StatusFailed
 					_ = store.Save(value)
@@ -194,7 +194,7 @@ func (a *App) lifecycleCommand(action string) *cobra.Command {
 				var opErr error
 				if action == "start" {
 					forwarding, hasForwarding := p.(backend.Forwarding)
-					forwardingSpec := backend.Spec{Config: c, Architecture: architectureForHost()}
+					forwardingSpec := a.backendSpec(c, false)
 					if hasForwarding {
 						if err := forwarding.ConfigureForwarding(cmd.Context(), forwardingSpec); err != nil {
 							return err
@@ -207,14 +207,14 @@ func (a *App) lifecycleCommand(action string) *cobra.Command {
 				if opErr != nil {
 					if action == "start" {
 						if forwarding, ok := p.(backend.Forwarding); ok {
-							_ = forwarding.RemoveForwarding(cmd.Context(), backend.Spec{Config: c, Architecture: architectureForHost()})
+							_ = forwarding.RemoveForwarding(cmd.Context(), a.backendSpec(c, false))
 						}
 					}
 					return opErr
 				}
 				if action == "stop" {
 					if forwarding, ok := p.(backend.Forwarding); ok {
-						if err := forwarding.RemoveForwarding(cmd.Context(), backend.Spec{Config: c, Architecture: architectureForHost()}); err != nil {
+						if err := forwarding.RemoveForwarding(cmd.Context(), a.backendSpec(c, false)); err != nil {
 							return err
 						}
 					}
@@ -404,7 +404,7 @@ func (a *App) upgradeCommand() *cobra.Command {
 			if _, err := store.Load(c.VMName); err != nil {
 				return err
 			}
-			return p.Upgrade(cmd.Context(), c.VMName, backend.Spec{Config: c, Architecture: architectureForHost()})
+			return p.Upgrade(cmd.Context(), c.VMName, a.backendSpec(c, false))
 		},
 	}
 	cmd.Flags().BoolVar(&yes, "yes", false, "confirm the guest upgrade non-interactively")
@@ -429,7 +429,7 @@ func (a *App) destroyCommand() *cobra.Command {
 			}
 			return store.WithLock(cmd.Context(), c.VMName, func() error {
 				if forwarding, ok := p.(backend.Forwarding); ok {
-					if err := forwarding.RemoveForwarding(cmd.Context(), backend.Spec{Config: c, Architecture: architectureForHost()}); err != nil && !force {
+					if err := forwarding.RemoveForwarding(cmd.Context(), a.backendSpec(c, false)); err != nil && !force {
 						return err
 					}
 				}

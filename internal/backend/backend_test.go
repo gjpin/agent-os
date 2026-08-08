@@ -2,10 +2,14 @@ package backend
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/zero/agent-os/internal/execx"
 	"github.com/zero/agent-os/internal/model"
+	"github.com/zero/agent-os/internal/provision"
 )
 
 func TestLimaUsesArgumentArrays(t *testing.T) {
@@ -43,5 +47,56 @@ func TestLibvirtForwardingUsesWireGuardInterface(t *testing.T) {
 	last := runner.Calls[len(runner.Calls)-1]
 	if last.Name != "sudo" || len(last.Args) != 3 || last.Args[0] != "nft" || last.Args[1] != "-f" || last.Args[2] != "-" {
 		t.Fatalf("nft rules were not installed: %+v", last)
+	}
+}
+
+func TestDryRunProvidersIncludeAgentInstructions(t *testing.T) {
+	content := "# embedded from the release\n\nDo not depend on the caller's cwd.\n"
+	providers := []struct {
+		name     string
+		provider Provider
+		artifact string
+	}{
+		{name: "libvirt", provider: Libvirt{}, artifact: "user-data"},
+		{name: "lima", provider: Lima{}, artifact: "lima.yaml"},
+	}
+
+	for _, test := range providers {
+		t.Run(test.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			config := model.DefaultConfig(stateDir)
+			config.VMName = "dry-run-" + test.name
+			spec := Spec{
+				Config:            config,
+				Architecture:      "x86_64",
+				AgentInstructions: content,
+				DryRun:            true,
+			}
+			if err := test.provider.Create(context.Background(), spec); err != nil {
+				t.Fatal(err)
+			}
+			artifactPath := filepath.Join(stateDir, "v1", "vms", config.VMName, "artifacts", test.artifact)
+			data, err := os.ReadFile(artifactPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			artifact := string(data)
+			for _, expected := range []string{
+				"# embedded from the release",
+				"Do not depend on the caller",
+				provision.AgentInstructionsCanonicalPath,
+				provision.AgentInstructionsOpencodePath,
+				provision.AgentInstructionsCodexPath,
+				provision.AgentInstructionsClaudePath,
+				provision.AgentInstructionsPiPath,
+				provision.AgentInstructionsCopilotPath,
+				"rm -rf --",
+				"ln -s --",
+			} {
+				if !strings.Contains(artifact, expected) {
+					t.Errorf("artifact omits %q", expected)
+				}
+			}
+		})
 	}
 }

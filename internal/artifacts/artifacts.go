@@ -15,21 +15,22 @@ import (
 )
 
 type VMDefinition struct {
-	Name           string
-	CPUs           int
-	MemoryMiB      int
-	DiskGiB        int
-	Architecture   string
-	AccessMode     model.AccessMode
-	OrcaPort       int
-	Packages       []string
-	ImagePath      string
-	BindAddress    string
-	PairingAddress string
-	GuestAddress   string
-	MACAddress     string
-	SecurityModel  string
-	AllowedCIDRs   []string
+	Name              string
+	CPUs              int
+	MemoryMiB         int
+	DiskGiB           int
+	Architecture      string
+	AccessMode        model.AccessMode
+	OrcaPort          int
+	Packages          []string
+	ImagePath         string
+	BindAddress       string
+	PairingAddress    string
+	GuestAddress      string
+	MACAddress        string
+	SecurityModel     string
+	AllowedCIDRs      []string
+	AgentInstructions string
 }
 
 func FromConfig(c model.Config, architecture string) VMDefinition {
@@ -158,10 +159,15 @@ func LimaYAML(def VMDefinition) (string, error) {
 	if def.ImagePath != "" {
 		fmt.Fprintf(&b, "images:\n  - location: %s\n    arch: %s\n", strconv.Quote(def.ImagePath), architecture(def.Architecture))
 	}
+	agentInstructionsScript := provision.AgentInstructionsScript(def.AgentInstructions)
 	b.WriteString("mountType: none\nmounts: []\nssh: true\nsshLoadDotSSHPubKeys: false\n\nprovision:\n  - mode: system\n    script: |")
 	b.WriteString("\n      set -eu\n      useradd --create-home --shell /bin/bash agent || true\n")
 	b.WriteString("      usermod --lock agent || true\n")
 	b.WriteString("      systemctl disable --now containerd.service 2>/dev/null || true\n")
+	agentInstructionsDelimiter := heredocDelimiter("AGENT_OS_AGENT_INSTRUCTIONS", agentInstructionsScript)
+	fmt.Fprintf(&b, "      cat > /run/agent-os-provision-agent-instructions <<'%s'\n", agentInstructionsDelimiter)
+	appendIndented(&b, agentInstructionsScript, "      ")
+	fmt.Fprintf(&b, "      %s\n      /bin/bash /run/agent-os-provision-agent-instructions\n", agentInstructionsDelimiter)
 	b.WriteString("      cat > /run/agent-os-install-orca <<'AGENT_OS_ORCA_INSTALL'\n")
 	appendIndented(&b, orcaInstallScript, "      ")
 	b.WriteString("      AGENT_OS_ORCA_INSTALL\n      /bin/bash /run/agent-os-install-orca\n")
@@ -197,6 +203,8 @@ func CloudInit(def VMDefinition, repositoryKeyPath string) string {
 	}
 	b.WriteString("  - path: /etc/systemd/system/orca.service\n    permissions: '0644'\n    content: |\n")
 	appendIndented(&b, OrcaSystemdUnit(def.OrcaPort, def.BindAddress, def.PairingAddress), "      ")
+	b.WriteString("  - path: /usr/local/libexec/agent-os-provision-agent-instructions\n    permissions: '0700'\n    content: |\n")
+	appendIndented(&b, provision.AgentInstructionsScript(def.AgentInstructions), "      ")
 	b.WriteString("  - path: /etc/agent-os/firewall.rules\n    permissions: '0600'\n    content: |\n")
 	appendIndented(&b, strings.Join(FirewallRules(def.AllowedCIDRs, def.OrcaPort), "\n"), "      ")
 	orcaInstallScript, err := releases.OrcaInstallScript(def.Architecture)
@@ -207,7 +215,8 @@ func CloudInit(def VMDefinition, repositoryKeyPath string) string {
 	appendIndented(&b, orcaInstallScript, "      ")
 	b.WriteString("  - path: /etc/systemd/system/agent-os-firewall.service\n    permissions: '0644'\n    content: |\n")
 	appendIndented(&b, FirewallSystemdUnit(), "      ")
-	b.WriteString("runcmd:\n  - [bash, /usr/local/libexec/agent-os-install-orca]\n")
+	b.WriteString("runcmd:\n  - [bash, /usr/local/libexec/agent-os-provision-agent-instructions]\n")
+	b.WriteString("  - [bash, /usr/local/libexec/agent-os-install-orca]\n")
 	b.WriteString("  - [systemctl, daemon-reload]\n")
 	b.WriteString("  - [systemctl, enable, --now, agent-os-firewall.service]\n")
 	b.WriteString("  - [systemctl, enable, --now, orca.service]\n")
@@ -218,6 +227,14 @@ func appendIndented(b *strings.Builder, value, prefix string) {
 	for _, line := range strings.Split(strings.TrimSuffix(value, "\n"), "\n") {
 		b.WriteString(prefix + line + "\n")
 	}
+}
+
+func heredocDelimiter(prefix, value string) string {
+	delimiter := prefix
+	for strings.Contains(value, delimiter) {
+		delimiter += "_"
+	}
+	return delimiter
 }
 
 func OrcaSystemdUnit(port int, bindAddress string, pairingAddress ...string) string {

@@ -29,17 +29,28 @@ type App struct {
 	Err    io.Writer
 	Runner execx.Runner
 
-	root       *cobra.Command
-	resolved   config.Resolved
-	configPath string
-	logFormat  string
-	flagValues map[string]any
+	root              *cobra.Command
+	resolved          config.Resolved
+	configPath        string
+	logFormat         string
+	flagValues        map[string]any
+	agentInstructions string
 }
 
 // Version is set by release builds; development builds report dev.
 var Version = "dev"
 
-func New(in io.Reader, out, errOut io.Writer, runner execx.Runner) *App {
+func New(in io.Reader, out, errOut io.Writer, runner execx.Runner, instructions ...string) *App {
+	content := ""
+	if len(instructions) > 0 {
+		content = instructions[0]
+	}
+	return NewWithInstructions(in, out, errOut, runner, content)
+}
+
+// NewWithInstructions constructs an application with the repository
+// instructions that should be provisioned into newly created VMs.
+func NewWithInstructions(in io.Reader, out, errOut io.Writer, runner execx.Runner, agentInstructions string) *App {
 	if in == nil {
 		in = os.Stdin
 	}
@@ -52,13 +63,17 @@ func New(in io.Reader, out, errOut io.Writer, runner execx.Runner) *App {
 	if runner == nil {
 		runner = execx.OSRunner{}
 	}
-	app := &App{In: in, Out: out, Err: errOut, Runner: runner}
+	app := &App{In: in, Out: out, Err: errOut, Runner: runner, agentInstructions: agentInstructions}
 	app.root = app.newRoot()
 	return app
 }
 
-func Execute() {
-	app := New(os.Stdin, os.Stdout, os.Stderr, execx.OSRunner{})
+func Execute(agentInstructions ...string) {
+	content := ""
+	if len(agentInstructions) > 0 {
+		content = agentInstructions[0]
+	}
+	app := NewWithInstructions(os.Stdin, os.Stdout, os.Stderr, execx.OSRunner{}, content)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := app.root.ExecuteContext(ctx); err != nil {
@@ -208,6 +223,15 @@ func (a *App) providerAndConfig(name string) (backend.Provider, model.Config, st
 		return nil, model.Config{}, state.Store{}, err
 	}
 	return p, c, a.store(c), nil
+}
+
+func (a *App) backendSpec(c model.Config, dryRun bool) backend.Spec {
+	return backend.Spec{
+		Config:            c,
+		Architecture:      architectureForHost(),
+		AgentInstructions: a.agentInstructions,
+		DryRun:            dryRun,
+	}
 }
 
 func execAsAgent(ctx context.Context, p backend.Provider, name string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {

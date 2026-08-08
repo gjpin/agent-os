@@ -50,6 +50,7 @@ func (l Lima) EnsureNetwork(context.Context, Spec) error { return nil }
 
 func (l Lima) Create(ctx context.Context, spec Spec) error {
 	definition := artifacts.FromConfig(spec.Config, spec.Architecture)
+	definition.AgentInstructions = spec.AgentInstructions
 	artifactDir := filepath.Join(spec.Config.StateDir, "v1", "vms", spec.Config.VMName, "artifacts")
 	if err := os.MkdirAll(artifactDir, 0o700); err != nil {
 		return err

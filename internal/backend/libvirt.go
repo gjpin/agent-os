@@ -34,6 +34,7 @@ func (l Libvirt) Available(ctx context.Context) error {
 func (l Libvirt) Create(ctx context.Context, spec Spec) error {
 	definition := artifacts.FromConfig(spec.Config, spec.Architecture)
 	definition.SecurityModel = libvirtSecurityModel()
+	definition.AgentInstructions = spec.AgentInstructions
 	artifactDir := filepath.Join(spec.Config.StateDir, "v1", "vms", spec.Config.VMName, "artifacts")
 	if err := os.MkdirAll(artifactDir, 0o700); err != nil {
 		return err

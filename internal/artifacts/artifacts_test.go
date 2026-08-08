@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/zero/agent-os/internal/model"
+	"github.com/zero/agent-os/internal/provision"
 )
 
 func TestGeneratedArtifactsDisableHostSharing(t *testing.T) {
@@ -30,6 +31,46 @@ func TestGeneratedArtifactsDisableHostSharing(t *testing.T) {
 		t.Fatal("cloud-init leaked host key path or omitted agent")
 	}
 	_ = model.AccessLocal
+}
+
+func TestAgentInstructionsAreIncludedInProviderArtifacts(t *testing.T) {
+	content := "# shared instructions\n\nKeep this exact.\n"
+	def := VMDefinition{
+		Name: "agents", CPUs: 2, MemoryMiB: 4096, DiskGiB: 120,
+		Architecture: "x86_64", AgentInstructions: content,
+	}
+	cloudInit := CloudInit(def, "")
+	lima, err := LimaYAML(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, artifact := range map[string]string{"cloud-init": cloudInit, "Lima": lima} {
+		for _, line := range []string{"# shared instructions", "Keep this exact."} {
+			if !strings.Contains(artifact, line) {
+				t.Errorf("%s omits embedded instruction line %q", name, line)
+			}
+		}
+		for _, expected := range []string{
+			provision.AgentInstructionsCanonicalPath,
+			provision.AgentInstructionsOpencodePath,
+			provision.AgentInstructionsCodexPath,
+			provision.AgentInstructionsClaudePath,
+			provision.AgentInstructionsPiPath,
+			provision.AgentInstructionsCopilotPath,
+			"rm -rf --",
+			"ln -s --",
+		} {
+			if !strings.Contains(artifact, expected) {
+				t.Errorf("%s omits setup detail %q", name, expected)
+			}
+		}
+	}
+	if !strings.Contains(cloudInit, "/usr/local/libexec/agent-os-provision-agent-instructions") {
+		t.Fatal("cloud-init does not install and run the setup script")
+	}
+	if !strings.Contains(lima, "/run/agent-os-provision-agent-instructions") {
+		t.Fatal("Lima does not run the setup script")
+	}
 }
 
 func TestForwardingArtifactsUseHostEndpoint(t *testing.T) {

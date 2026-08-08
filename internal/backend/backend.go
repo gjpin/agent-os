@@ -8,9 +8,10 @@ import (
 )
 
 type Spec struct {
-	Config       model.Config
-	Architecture string
-	DryRun       bool
+	Config            model.Config
+	Architecture      string
+	AgentInstructions string
+	DryRun            bool
 }
 
 type Status struct {
