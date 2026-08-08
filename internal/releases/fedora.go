@@ -10,7 +10,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/zero/agent-os/internal/execx"
+	"github.com/gjpin/agent-os/internal/execx"
 )
 
 const (

@@ -4,7 +4,7 @@ import (
 	"context"
 	"io"
 
-	"github.com/zero/agent-os/internal/model"
+	"github.com/gjpin/agent-os/internal/model"
 )
 
 type Spec struct {

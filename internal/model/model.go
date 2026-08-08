@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/zero/agent-os/internal/provision"
+	"github.com/gjpin/agent-os/internal/provision"
 )
 
 // AccessMode controls which host address Orca binds to.
@@ -60,7 +60,7 @@ func DefaultConfig(stateDir string) Config {
 		VMDiskGiB:         DefaultVMDiskGiB,
 		AccessMode:        AccessLocal,
 		OrcaPort:          DefaultOrcaPort,
-		ReleaseRepository: "zero/agent-os",
+		ReleaseRepository: "gjpin/agent-os",
 		StateDir:          stateDir,
 		LogFormat:         LogHuman,
 		Packages: []string{
@@ -150,7 +150,7 @@ func validInterfaceName(value string) bool {
 }
 
 // AdaptResources retains host capacity while honoring the documented maximum
-// of eight vCPUs and 16 GiB. Zero host values mean that probing was not
+// of eight vCPUs and 16 GiB. Missing host values mean that probing was not
 // available, so only the documented maxima are applied.
 func AdaptResources(c Config, hostCPUs, hostMemoryMiB int) Config {
 	if hostCPUs > 1 {

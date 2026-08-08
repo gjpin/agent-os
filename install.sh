@@ -4,7 +4,7 @@ set -eu
 
 umask 077
 
-repository="${AGENT_OS_RELEASE_REPOSITORY:-zero/agent-os}"
+repository="${AGENT_OS_RELEASE_REPOSITORY:-gjpin/agent-os}"
 version="${1:-${AGENT_OS_VERSION:-latest}}"
 install_dir="${AGENT_OS_INSTALL_DIR:-${HOME}/.local/bin}"
 

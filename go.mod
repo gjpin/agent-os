@@ -1,4 +1,4 @@
-module github.com/zero/agent-os
+module github.com/gjpin/agent-os
 
 go 1.26
 

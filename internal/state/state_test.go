@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zero/agent-os/internal/model"
+	"github.com/gjpin/agent-os/internal/model"
 )
 
 func TestSaveIsAtomicPrivateAndVersioned(t *testing.T) {

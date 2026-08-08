@@ -11,14 +11,14 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/zero/agent-os/internal/artifacts"
-	"github.com/zero/agent-os/internal/backend"
-	"github.com/zero/agent-os/internal/config"
-	"github.com/zero/agent-os/internal/credentials"
-	"github.com/zero/agent-os/internal/host"
-	"github.com/zero/agent-os/internal/model"
-	"github.com/zero/agent-os/internal/provision"
-	"github.com/zero/agent-os/internal/state"
+	"github.com/gjpin/agent-os/internal/artifacts"
+	"github.com/gjpin/agent-os/internal/backend"
+	"github.com/gjpin/agent-os/internal/config"
+	"github.com/gjpin/agent-os/internal/credentials"
+	"github.com/gjpin/agent-os/internal/host"
+	"github.com/gjpin/agent-os/internal/model"
+	"github.com/gjpin/agent-os/internal/provision"
+	"github.com/gjpin/agent-os/internal/state"
 )
 
 func (a *App) setupHostCommand() *cobra.Command {

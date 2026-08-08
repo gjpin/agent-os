@@ -6,7 +6,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/zero/agent-os/internal/execx"
+	"github.com/gjpin/agent-os/internal/execx"
 )
 
 func command(runner execx.Runner, ctx context.Context, name string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {

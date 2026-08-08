@@ -1,5 +1,5 @@
 VERSION ?= dev
-LDFLAGS ?= -s -w -X github.com/zero/agent-os/internal/cli.Version=$(VERSION)
+LDFLAGS ?= -s -w -X github.com/gjpin/agent-os/internal/cli.Version=$(VERSION)
 
 .PHONY: build test race vet fmt check
 

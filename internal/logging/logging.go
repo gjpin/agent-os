@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/zero/agent-os/internal/model"
+	"github.com/gjpin/agent-os/internal/model"
 )
 
 type Logger struct {

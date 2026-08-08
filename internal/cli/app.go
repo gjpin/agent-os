@@ -14,13 +14,13 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
-	"github.com/zero/agent-os/internal/backend"
-	"github.com/zero/agent-os/internal/config"
-	"github.com/zero/agent-os/internal/execx"
-	"github.com/zero/agent-os/internal/host"
-	"github.com/zero/agent-os/internal/logging"
-	"github.com/zero/agent-os/internal/model"
-	"github.com/zero/agent-os/internal/state"
+	"github.com/gjpin/agent-os/internal/backend"
+	"github.com/gjpin/agent-os/internal/config"
+	"github.com/gjpin/agent-os/internal/execx"
+	"github.com/gjpin/agent-os/internal/host"
+	"github.com/gjpin/agent-os/internal/logging"
+	"github.com/gjpin/agent-os/internal/model"
+	"github.com/gjpin/agent-os/internal/state"
 )
 
 type App struct {

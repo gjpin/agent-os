@@ -9,11 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/zero/agent-os/internal/artifacts"
-	"github.com/zero/agent-os/internal/execx"
-	"github.com/zero/agent-os/internal/logging"
-	"github.com/zero/agent-os/internal/model"
-	"github.com/zero/agent-os/internal/releases"
+	"github.com/gjpin/agent-os/internal/artifacts"
+	"github.com/gjpin/agent-os/internal/execx"
+	"github.com/gjpin/agent-os/internal/logging"
+	"github.com/gjpin/agent-os/internal/model"
+	"github.com/gjpin/agent-os/internal/releases"
 )
 
 type Libvirt struct {

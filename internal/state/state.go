@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/zero/agent-os/internal/model"
+	"github.com/gjpin/agent-os/internal/model"
 )
 
 const SchemaVersion = 1

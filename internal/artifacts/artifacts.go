@@ -9,9 +9,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/zero/agent-os/internal/model"
-	"github.com/zero/agent-os/internal/provision"
-	"github.com/zero/agent-os/internal/releases"
+	"github.com/gjpin/agent-os/internal/model"
+	"github.com/gjpin/agent-os/internal/provision"
+	"github.com/gjpin/agent-os/internal/releases"
 )
 
 type VMDefinition struct {

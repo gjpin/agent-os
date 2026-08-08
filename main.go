@@ -3,7 +3,7 @@ package main
 import (
 	_ "embed"
 
-	"github.com/zero/agent-os/internal/cli"
+	"github.com/gjpin/agent-os/internal/cli"
 )
 
 // The shared instruction source is part of the release input. Embedding it

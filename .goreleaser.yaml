@@ -15,7 +15,7 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w -X github.com/zero/agent-os/internal/cli.Version={{ .Version }}
+      - -s -w -X github.com/gjpin/agent-os/internal/cli.Version={{ .Version }}
     goos:
       - linux
       - darwin
@@ -43,7 +43,7 @@ snapshot:
 
 release:
   github:
-    owner: zero
+    owner: gjpin
     name: agent-os
   mode: replace
 

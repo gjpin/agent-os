@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zero/agent-os/internal/model"
-	"github.com/zero/agent-os/internal/provision"
+	"github.com/gjpin/agent-os/internal/model"
+	"github.com/gjpin/agent-os/internal/provision"
 )
 
 func TestGeneratedArtifactsDisableHostSharing(t *testing.T) {

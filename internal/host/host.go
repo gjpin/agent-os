@@ -6,8 +6,8 @@ import (
 	"io"
 	"runtime"
 
-	"github.com/zero/agent-os/internal/backend"
-	"github.com/zero/agent-os/internal/execx"
+	"github.com/gjpin/agent-os/internal/backend"
+	"github.com/gjpin/agent-os/internal/execx"
 )
 
 type Info struct {

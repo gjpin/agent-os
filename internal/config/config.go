@@ -12,7 +12,7 @@ import (
 
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
-	"github.com/zero/agent-os/internal/model"
+	"github.com/gjpin/agent-os/internal/model"
 )
 
 const (
