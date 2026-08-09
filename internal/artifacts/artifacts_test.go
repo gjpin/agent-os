@@ -363,7 +363,7 @@ func TestAgentInstructionsAreIncludedInProviderArtifacts(t *testing.T) {
 	}
 }
 
-func TestCodingAgentsInstallerIsOrderedBeforeOrcaForEveryProvider(t *testing.T) {
+func TestKindAndCodingAgentsInstallersAreOrderedBeforeOrcaForEveryProvider(t *testing.T) {
 	def := VMDefinition{Name: "agents", CPUs: 2, MemoryMiB: 4096, DiskGiB: 120, Architecture: "x86_64", Packages: []string{"htop", "git"}}
 	cloudInit := CloudInit(def, "")
 	lima, err := LimaYAML(def)
@@ -403,6 +403,9 @@ func TestCodingAgentsInstallerIsOrderedBeforeOrcaForEveryProvider(t *testing.T) 
 		t.Error("Lima includes the libvirt-only qemu guest agent")
 	}
 	for name, artifact := range map[string]string{"cloud-init": cloudInit, "Lima": lima} {
+		if strings.Count(artifact, `log_driver = "k8s-file"`) != 1 {
+			t.Errorf("%s does not embed the kind Podman setup exactly once", name)
+		}
 		for _, command := range []string{
 			"dnf install -y -- dnf-plugins-core",
 			"dnf config-manager addrepo --from-repofile=https://rpm.releases.hashicorp.com/fedora/hashicorp.repo",
@@ -417,13 +420,14 @@ func TestCodingAgentsInstallerIsOrderedBeforeOrcaForEveryProvider(t *testing.T) 
 		}
 		instructions := strings.Index(artifact, "agent-os-provision-agent-instructions")
 		packageInstall := strings.Index(artifact, "dnf install -y -- ")
+		kindSetup := strings.Index(artifact, "agent-os-setup-kind-podman")
 		agents := strings.Index(artifact, "agent-os-install-coding-agents")
 		orca := strings.Index(artifact, "agent-os-install-orca")
-		if name == "Lima" && (packageInstall < 0 || !(instructions < packageInstall && packageInstall < agents)) {
-			t.Fatalf("Lima package provisioning order is instructions=%d packages=%d agents=%d", instructions, packageInstall, agents)
+		if name == "Lima" && (packageInstall < 0 || !(instructions < packageInstall && packageInstall < kindSetup)) {
+			t.Fatalf("Lima package provisioning order is instructions=%d packages=%d kind=%d", instructions, packageInstall, kindSetup)
 		}
-		if instructions < 0 || agents < 0 || orca < 0 || !(instructions < agents && agents < orca) {
-			t.Fatalf("%s provisioning order is instructions=%d agents=%d orca=%d", name, instructions, agents, orca)
+		if instructions < 0 || kindSetup < 0 || agents < 0 || orca < 0 || !(instructions < kindSetup && kindSetup < agents && agents < orca) {
+			t.Fatalf("%s provisioning order is instructions=%d kind=%d agents=%d orca=%d", name, instructions, kindSetup, agents, orca)
 		}
 		for _, endpoint := range []string{
 			"https://opencode.ai/install",

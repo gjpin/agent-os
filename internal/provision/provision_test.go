@@ -33,7 +33,7 @@ acl attr entr inotify-tools
 python3-pip pipx
 direnv tmux
 moreutils parallel gnupg2 man-db man-pages
-kubernetes1.36-client helm kustomize opentofu
+kubernetes1.36-client helm kind kustomize opentofu
 `)
 	sort.Strings(want)
 	got := BaselinePackages()
@@ -242,5 +242,43 @@ func TestCodingAgentsScriptContainsRequiredInstallersAndSafetyControls(t *testin
 	}
 	if strings.Count(script, "readonly path_line=") != 1 {
 		t.Fatal("managed PATH line is not defined exactly once")
+	}
+}
+
+func TestKindPodmanScriptContainsRootlessPrerequisites(t *testing.T) {
+	script := KindPodmanScript()
+	command := exec.Command("bash", "-n")
+	command.Stdin = strings.NewReader(script)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("kind Podman setup is not valid Bash: %v\n%s", err, output)
+	}
+	for _, expected := range []string{
+		"set -euo pipefail",
+		"$agent_home/.config/containers/containers.conf.d/agent-os-kind.conf",
+		`log_driver = "k8s-file"`,
+		"pids_limit = 65536",
+		"ip6_tables\nip6table_nat\nip_tables\niptable_nat",
+		`modprobe "$module"`,
+		"fs.inotify.max_user_watches = 524288",
+		"fs.inotify.max_user_instances = 512",
+		"sysctl --system",
+		"/etc/systemd/system/user@.service.d/agent-os-kind.conf",
+		"Delegate=yes",
+		`loginctl enable-linger "$agent_user"`,
+		`systemctl start "user@$agent_uid.service"`,
+		`export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$user_uid}"`,
+		`export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"`,
+		`export KIND_EXPERIMENTAL_PROVIDER="${KIND_EXPERIMENTAL_PROVIDER:-podman}"`,
+		"/usr/bin/systemd-run --user --scope --quiet",
+		"--property=Delegate=yes -- /usr/bin/kind \"$@\"",
+		`test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs`,
+		"/usr/bin/kind /usr/bin/podman",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Errorf("kind Podman setup omits %q", expected)
+		}
+	}
+	if strings.Contains(script, "net.ipv4.ip_unprivileged_port_start") || strings.Contains(script, "kernel.dmesg_restrict") {
+		t.Fatal("kind Podman setup relaxes an excluded sysctl")
 	}
 }

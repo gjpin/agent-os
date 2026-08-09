@@ -58,7 +58,10 @@ Lima/aarch64. It includes standard shell and file utilities; Git and GitHub
 tools; Python, Go, Rust, Node.js 24, pnpm, Java 25, and native build toolchains;
 LLVM and GNU compilers/debuggers; Podman/Buildah/Skopeo; RPM development tools;
 networking and diagnostics; manuals and terminal tools; and Kubernetes 1.36,
-Helm, Kustomize, OpenTofu, and Terraform clients. The canonical package
+rootless-Podman-ready kind, Helm, Kustomize, OpenTofu, and Terraform clients.
+The kind launcher defaults to Podman and runs in a delegated user cgroup; no
+cluster is created automatically. Existing VMs must be recreated to receive
+the rootless configuration. The canonical package
 inventory and first-boot installers are in `internal/provision/provision.go`.
 
 The `packages` config key, `--packages`, and `AGENT_OS_PACKAGES` specify

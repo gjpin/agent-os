@@ -44,7 +44,7 @@ acl attr entr inotify-tools
 python3-pip pipx
 direnv tmux
 moreutils parallel gnupg2 man-db man-pages
-kubernetes1.36-client helm kustomize opentofu
+kubernetes1.36-client helm kind kustomize opentofu
 `)
 
 // BaselinePackages returns a sorted copy of the packages guaranteed in every
@@ -167,6 +167,82 @@ done
 install -d -o root -g root -m 0755 /var/lib/agent-os
 touch "$ready_marker"
 chmod 0644 "$ready_marker"
+`
+}
+
+// KindPodmanScript returns the root-run, idempotent setup for running kind with
+// rootless Podman as the unprivileged agent user.
+func KindPodmanScript() string {
+	return `#!/bin/bash
+set -euo pipefail
+
+readonly agent_user=agent
+readonly agent_home=/home/agent
+agent_uid="$(id -u "$agent_user")"
+readonly agent_uid
+
+install -d -o "$agent_user" -g "$agent_user" -m 0755 \
+  "$agent_home/.config" \
+  "$agent_home/.config/containers" \
+  "$agent_home/.config/containers/containers.conf.d"
+cat > "$agent_home/.config/containers/containers.conf.d/agent-os-kind.conf" <<'AGENT_OS_KIND_CONTAINERS'
+[containers]
+log_driver = "k8s-file"
+pids_limit = 65536
+AGENT_OS_KIND_CONTAINERS
+chown "$agent_user:$agent_user" \
+  "$agent_home/.config/containers/containers.conf.d/agent-os-kind.conf"
+chmod 0644 "$agent_home/.config/containers/containers.conf.d/agent-os-kind.conf"
+
+cat > /etc/modules-load.d/agent-os-kind.conf <<'AGENT_OS_KIND_MODULES'
+ip6_tables
+ip6table_nat
+ip_tables
+iptable_nat
+AGENT_OS_KIND_MODULES
+chmod 0644 /etc/modules-load.d/agent-os-kind.conf
+while read -r module; do
+  modprobe "$module"
+done < /etc/modules-load.d/agent-os-kind.conf
+
+cat > /etc/sysctl.d/90-agent-os-kind.conf <<'AGENT_OS_KIND_SYSCTLS'
+fs.inotify.max_user_watches = 524288
+fs.inotify.max_user_instances = 512
+AGENT_OS_KIND_SYSCTLS
+chmod 0644 /etc/sysctl.d/90-agent-os-kind.conf
+sysctl --system
+
+install -d -o root -g root -m 0755 /etc/systemd/system/user@.service.d
+cat > /etc/systemd/system/user@.service.d/agent-os-kind.conf <<'AGENT_OS_KIND_DELEGATION'
+[Service]
+Delegate=yes
+AGENT_OS_KIND_DELEGATION
+chmod 0644 /etc/systemd/system/user@.service.d/agent-os-kind.conf
+loginctl enable-linger "$agent_user"
+systemctl daemon-reload
+systemctl start "user@$agent_uid.service"
+systemctl is-active --quiet "user@$agent_uid.service"
+
+cat > /usr/local/bin/kind <<'AGENT_OS_KIND_LAUNCHER'
+#!/bin/bash
+set -euo pipefail
+
+user_uid="$(id -u)"
+readonly user_uid
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$user_uid}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+export KIND_EXPERIMENTAL_PROVIDER="${KIND_EXPERIMENTAL_PROVIDER:-podman}"
+
+exec /usr/bin/systemd-run --user --scope --quiet \
+  --property=Delegate=yes -- /usr/bin/kind "$@"
+AGENT_OS_KIND_LAUNCHER
+chown root:root /usr/local/bin/kind
+chmod 0755 /usr/local/bin/kind
+
+test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
+for executable in /usr/bin/kind /usr/bin/podman /usr/bin/systemd-run /usr/local/bin/kind; do
+  test -x "$executable"
+done
 `
 }
 
