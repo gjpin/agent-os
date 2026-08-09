@@ -59,7 +59,7 @@ func detect(goos, architecture string, release io.Reader) Info {
 	provider := "unsupported"
 	switch goos {
 	case "linux":
-		if family != "" {
+		if family != "" && (family != "arch" || architecture == "amd64") {
 			provider = "libvirt"
 		}
 	case "darwin":
@@ -84,14 +84,17 @@ func SupportedDistribution(distribution string) bool {
 }
 
 // DistributionFamily maps an os-release ID to the package family supported by
-// agent-os. Only Fedora and Ubuntu are supported; compatible derivatives are
-// intentionally rejected until their package/service layouts are tested.
+// agent-os. Only Fedora, Ubuntu, and Arch are supported; compatible
+// derivatives are intentionally rejected until their package/service layouts
+// are tested.
 func DistributionFamily(distribution string) string {
 	switch strings.ToLower(strings.TrimSpace(distribution)) {
 	case "fedora":
 		return "fedora"
 	case "ubuntu":
 		return "ubuntu"
+	case "arch":
+		return "arch"
 	default:
 		return ""
 	}
@@ -149,12 +152,15 @@ func unsupportedLinuxDistribution(info Info) error {
 		return nil
 	}
 	if SupportedDistribution(info.Distribution) {
+		if DistributionFamily(info.Distribution) == "arch" && info.Architecture != "amd64" {
+			return fmt.Errorf("unsupported Arch Linux architecture %q; Arch Linux support requires x86_64 (linux/amd64)", info.Architecture)
+		}
 		return nil
 	}
 	if strings.TrimSpace(info.Distribution) == "" {
-		return fmt.Errorf("unable to detect a supported Linux distribution; supported distributions are Fedora and Ubuntu")
+		return fmt.Errorf("unable to detect a supported Linux distribution; supported distributions are Fedora, Ubuntu, and Arch Linux")
 	}
-	return fmt.Errorf("unsupported Linux distribution %q; supported distributions are Fedora and Ubuntu", info.Distribution)
+	return fmt.Errorf("unsupported Linux distribution %q; supported distributions are Fedora, Ubuntu, and Arch Linux", info.Distribution)
 }
 
 func providerForLinux(info Info, runner execx.Runner, out, errOut io.Writer) (backend.Provider, error) {
@@ -183,7 +189,7 @@ func Provider(info Info, runner execx.Runner, out, errOut io.Writer) (backend.Pr
 		if err := unsupportedLinuxDistribution(info); err != nil {
 			return nil, err
 		}
-		return nil, fmt.Errorf("unsupported host %s/%s; supported hosts are Fedora/Ubuntu Linux and Apple Silicon macOS", info.OS, info.Architecture)
+		return nil, fmt.Errorf("unsupported host %s/%s; supported hosts are Fedora/Ubuntu Linux, x86_64 Arch Linux, and Apple Silicon macOS", info.OS, info.Architecture)
 	}
 }
 

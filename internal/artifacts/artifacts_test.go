@@ -154,6 +154,29 @@ func TestGeneratedArtifactsDisableHostSharing(t *testing.T) {
 	_ = model.AccessLocal
 }
 
+func TestLibvirtXMLSecurityModels(t *testing.T) {
+	for _, test := range []struct {
+		model string
+		want  string
+	}{
+		{model: "dac", want: `<seclabel type="dynamic" model="dac" relabel="yes"/>`},
+		{model: "apparmor", want: `<seclabel type="dynamic" model="apparmor" relabel="yes"/>`},
+		{model: "selinux", want: `<seclabel type="dynamic" model="selinux" relabel="yes"/>`},
+	} {
+		t.Run(test.model, func(t *testing.T) {
+			xmlDefinition, err := LibvirtXML(VMDefinition{
+				Name: "agents", CPUs: 2, MemoryMiB: 4096, DiskGiB: 120, SecurityModel: test.model,
+			}, "/state/disk.qcow2", "/state/cloud-init.iso")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(xmlDefinition, test.want) {
+				t.Fatalf("generated XML omits security label %q", test.want)
+			}
+		})
+	}
+}
+
 func TestRepositoryKeyProvisioningUsesGuestOnlyPathsAndSafeMetadata(t *testing.T) {
 	keyPath, privateData := writeArtifactTestKey(t, t.TempDir())
 	def := VMDefinition{

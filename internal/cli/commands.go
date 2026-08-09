@@ -62,7 +62,7 @@ func setupPlan(info host.Info) []string {
 	switch {
 	case info.OS == "darwin" && info.Architecture == "arm64":
 		return []string{"require Lima", "if Homebrew is missing, confirm and install it from the official source", "brew install lima"}
-	case info.OS == "linux" && family != "":
+	case info.OS == "linux" && family != "" && (family != "arch" || info.Architecture == "amd64"):
 		packages := prerequisitePackageNames(family)
 		return []string{
 			fmt.Sprintf("probe %s virtualization commands for %s", family, info.Distribution),
@@ -92,9 +92,12 @@ func (a *App) applySetup(ctx context.Context, info host.Info, plan []string) err
 	family := distributionFamily(info)
 	if family == "" {
 		if strings.TrimSpace(info.Distribution) == "" {
-			return fmt.Errorf("unable to detect a supported Linux distribution; supported distributions are Fedora and Ubuntu")
+			return fmt.Errorf("unable to detect a supported Linux distribution; supported distributions are Fedora, Ubuntu, and Arch Linux")
 		}
-		return fmt.Errorf("unsupported Linux distribution %q; supported distributions are Fedora and Ubuntu", info.Distribution)
+		return fmt.Errorf("unsupported Linux distribution %q; supported distributions are Fedora, Ubuntu, and Arch Linux", info.Distribution)
+	}
+	if family == "arch" && info.Architecture != "amd64" {
+		return fmt.Errorf("unsupported Arch Linux architecture %q; Arch Linux support requires x86_64 (linux/amd64)", info.Architecture)
 	}
 	missing := a.missingPrerequisitePackages(family)
 	if len(missing) == 0 {
@@ -110,6 +113,8 @@ func (a *App) applySetup(ctx context.Context, info host.Info, plan []string) err
 			executable, args = "sudo", append([]string{"dnf", "install", "-y"}, missing...)
 		case "ubuntu":
 			executable, args = "sudo", append([]string{"apt-get", "install", "-y"}, missing...)
+		case "arch":
+			executable, args = "sudo", append([]string{"pacman", "--sync", "--needed", "--noconfirm"}, missing...)
 		default:
 			return fmt.Errorf("unsupported Linux distribution %q", info.Distribution)
 		}
@@ -117,8 +122,13 @@ func (a *App) applySetup(ctx context.Context, info host.Info, plan []string) err
 			return err
 		}
 	}
+	if family == "arch" {
+		if err := a.Runner.Run(ctx, "sudo", []string{"systemctl", "enable", "--now", "libvirtd.service"}, nil, a.Out, a.Err); err != nil {
+			return fmt.Errorf("enable and start libvirtd.service: %w", err)
+		}
+	}
 
-	changed, err := a.ensureLibvirtQEMUHardening(ctx)
+	changed, err := a.ensureLibvirtQEMUHardeningFor(ctx, family)
 	if err != nil {
 		return err
 	}
@@ -147,6 +157,10 @@ var requiredLibvirtQEMUSettings = []libvirtQEMUSetting{
 // from qemu.conf. Existing values, including explicitly insecure values, are
 // never rewritten; the backend will reject those values during create/start.
 func (a *App) ensureLibvirtQEMUHardening(ctx context.Context) (bool, error) {
+	return a.ensureLibvirtQEMUHardeningFor(ctx, "")
+}
+
+func (a *App) ensureLibvirtQEMUHardeningFor(ctx context.Context, family string) (bool, error) {
 	readFile := a.ReadFile
 	if readFile == nil {
 		readFile = os.ReadFile
@@ -170,7 +184,7 @@ func (a *App) ensureLibvirtQEMUHardening(ctx context.Context) (bool, error) {
 	if err := a.Runner.Run(ctx, "sudo", []string{"tee", "-a", libvirtQEMUConfigPath}, strings.NewReader(block.String()), io.Discard, a.Err); err != nil {
 		return false, fmt.Errorf("append libvirt QEMU hardening settings: %w", err)
 	}
-	if err := a.restartLibvirtQEMU(ctx); err != nil {
+	if err := a.restartLibvirtQEMUFor(ctx, family); err != nil {
 		return true, err
 	}
 	return true, nil
@@ -205,6 +219,16 @@ func missingLibvirtQEMUSettings(data []byte) []libvirtQEMUSetting {
 }
 
 func (a *App) restartLibvirtQEMU(ctx context.Context) error {
+	return a.restartLibvirtQEMUFor(ctx, "")
+}
+
+func (a *App) restartLibvirtQEMUFor(ctx context.Context, family string) error {
+	if family == "arch" {
+		if err := a.Runner.Run(ctx, "sudo", []string{"systemctl", "restart", "libvirtd.service"}, nil, a.Out, a.Err); err != nil {
+			return fmt.Errorf("restart libvirt QEMU driver libvirtd.service: %w", err)
+		}
+		return nil
+	}
 	for _, service := range []string{"virtqemud.service", "libvirtd.service"} {
 		var state bytes.Buffer
 		if err := a.Runner.Run(ctx, "sudo", []string{"systemctl", "show", "--property=LoadState", "--value", service}, nil, &state, io.Discard); err != nil {
@@ -257,6 +281,16 @@ func prerequisitesFor(distribution string) []prerequisite {
 			{packageName: "dnsmasq", probes: []string{"dnsmasq"}},
 			{packageName: "cloud-image-utils", probes: []string{"cloud-localds"}},
 			{packageName: "nftables", probes: []string{"nft"}},
+		}
+	case "arch":
+		return []prerequisite{
+			{packageName: "qemu-base", probes: []string{"qemu-system-x86_64", "qemu-img"}},
+			{packageName: "libvirt", probes: []string{"libvirtd", "virsh"}},
+			{packageName: "virt-install", probes: []string{"virt-install"}},
+			{packageName: "dnsmasq", probes: []string{"dnsmasq"}},
+			{packageName: "cloud-image-utils", probes: []string{"cloud-localds"}},
+			{packageName: "nftables", probes: []string{"nft"}},
+			{packageName: "iptables", probes: []string{"iptables"}},
 		}
 	default:
 		return nil

@@ -137,10 +137,12 @@ func architecture(value string) string {
 }
 
 func securityModel(value string) string {
-	if value == "apparmor" {
-		return "apparmor"
+	switch value {
+	case "apparmor", "dac":
+		return value
+	default:
+		return "selinux"
 	}
-	return "selinux"
 }
 
 func memorySize(mib int) string {

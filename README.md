@@ -1,8 +1,9 @@
 # agent-os
 
 `agent-os` provisions a disposable, isolated Fedora Server agent VM and keeps
-its operational state separate from user configuration. Linux uses libvirt;
-Apple Silicon macOS uses Lima with Virtualization.framework.
+its operational state separate from user configuration. Fedora, Ubuntu, and
+stock x86_64 Arch Linux hosts use libvirt; Apple Silicon macOS uses Lima with
+Virtualization.framework. Arch derivatives and Arch Linux ARM are unsupported.
 
 The project is intentionally conservative about trust boundaries:
 
@@ -37,12 +38,13 @@ go run . completion zsh > ~/.zfunc/_agent-os
 
 `setup-host` displays prerequisites first. Applying Linux package changes needs
 `setup-host --apply --yes`; on macOS it will not run a Homebrew installer
-implicitly. `destroy` and `upgrade` also require `--yes` or an interactive
-confirmation. `auth codex` performs login inside the VM and never copies a host
-authentication database. The first `start` can take several minutes while the
-five coding agents resolve their latest versions from their official upstream
-installers. Existing VMs must be recreated to receive them; `upgrade` does not
-retrofit or refresh the agents. If
+implicitly. On Arch Linux, setup installs the required QEMU/libvirt tooling and
+enables `libvirtd.service`. `destroy` and `upgrade` also require `--yes` or an
+interactive confirmation. `auth codex` performs login inside the VM and never
+copies a host authentication database. The first `start` can take several
+minutes while the five coding agents resolve their latest versions from their
+official upstream installers. Existing VMs must be recreated to receive them;
+`upgrade` does not retrofit or refresh the agents. If
 `internal/instructions/AGENTS.md` changes, rebuild the `agent-os` binary before
 creating new VMs.
 

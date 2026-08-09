@@ -279,12 +279,28 @@ func (l Libvirt) ensureNetwork(ctx context.Context, definitionPath string) error
 }
 
 func libvirtSecurityModel() string {
-	data, err := os.ReadFile("/etc/os-release")
-	if err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			if strings.HasPrefix(line, "ID=") && strings.Trim(strings.TrimPrefix(line, "ID="), "\"") == "ubuntu" {
-				return "apparmor"
-			}
+	return libvirtSecurityModelAt("/etc/os-release")
+}
+
+func libvirtSecurityModelAt(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "selinux"
+	}
+	for _, rawLine := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(rawLine)
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(key) != "ID" {
+			continue
+		}
+		distribution := strings.ToLower(strings.Trim(strings.TrimSpace(value), "\"'"))
+		switch distribution {
+		case "arch":
+			return "dac"
+		case "ubuntu":
+			return "apparmor"
+		case "fedora":
+			return "selinux"
 		}
 	}
 	return "selinux"

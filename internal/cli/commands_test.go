@@ -151,6 +151,75 @@ func TestApplySetupInstallsOnlyMissingUbuntuPackages(t *testing.T) {
 	}
 }
 
+func TestMissingArchPrerequisitePackagesReportsOnlyMissing(t *testing.T) {
+	app := &App{LookPath: lookupCommands(
+		"qemu-system-x86_64", "qemu-img", "libvirtd", "virsh", "virt-install",
+		"dnsmasq", "cloud-localds", "nft",
+	)}
+
+	missing := app.missingPrerequisitePackages("arch")
+	if got, want := strings.Join(missing, ","), "iptables"; got != want {
+		t.Fatalf("unexpected missing Arch packages: got %q want %q", got, want)
+	}
+}
+
+func TestApplySetupArchSkipsPacmanWhenPrerequisitesExist(t *testing.T) {
+	runner := &execx.RecordingRunner{}
+	app := &App{
+		Out:    &bytes.Buffer{},
+		Runner: runner,
+		ReadFile: func(string) ([]byte, error) {
+			return validLibvirtQEMUConfig(), nil
+		},
+		LookPath: lookupCommands(
+			"qemu-system-x86_64", "qemu-img", "libvirtd", "virsh", "virt-install",
+			"dnsmasq", "cloud-localds", "nft", "iptables",
+		),
+	}
+	info := host.Info{OS: "linux", Architecture: "amd64", Distribution: "arch"}
+	if err := app.applySetup(context.Background(), info, setupPlan(info)); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.Calls) != 1 || strings.Contains(strings.Join(runner.Calls[0].Args, " "), "pacman") {
+		t.Fatalf("unexpected complete Arch setup calls: %+v", runner.Calls)
+	}
+	if got := strings.Join(runner.Calls[0].Args, " "); got != "systemctl enable --now libvirtd.service" {
+		t.Fatalf("libvirtd was not enabled: %s", got)
+	}
+}
+
+func TestApplySetupArchInstallsOnlyMissingPackagesAndRestartsLibvirtd(t *testing.T) {
+	runner := &setupScriptedRunner{}
+	app := &App{
+		Out:    &bytes.Buffer{},
+		Err:    &bytes.Buffer{},
+		Runner: runner,
+		ReadFile: func(string) ([]byte, error) {
+			return []byte("seccomp_sandbox = 1\n"), nil
+		},
+		LookPath: lookupCommands(
+			"qemu-system-x86_64", "qemu-img", "libvirtd", "virsh", "virt-install",
+			"dnsmasq", "cloud-localds", "nft",
+		),
+	}
+	info := host.Info{OS: "linux", Architecture: "amd64", Distribution: "arch"}
+	if err := app.applySetup(context.Background(), info, setupPlan(info)); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.Calls) != 4 {
+		t.Fatalf("unexpected Arch setup calls: %+v", runner.Calls)
+	}
+	if got := strings.Join(runner.Calls[0].Args, " "); got != "pacman --sync --needed --noconfirm iptables" {
+		t.Fatalf("unexpected pacman invocation: %s", got)
+	}
+	if got := strings.Join(runner.Calls[1].Args, " "); got != "systemctl enable --now libvirtd.service" {
+		t.Fatalf("unexpected service enable invocation: %s", got)
+	}
+	if got := strings.Join(runner.Calls[3].Args, " "); got != "systemctl restart libvirtd.service" {
+		t.Fatalf("unexpected service restart invocation: %s", got)
+	}
+}
+
 func TestEnsureLibvirtQEMUHardeningAppendsOnlyMissingSettings(t *testing.T) {
 	runner := &setupScriptedRunner{Outputs: []string{"", "loaded"}}
 	app := &App{

@@ -28,6 +28,18 @@ func TestDetectBytesSelectsOnlySupportedLinuxDistributions(t *testing.T) {
 			provider: "libvirt",
 		},
 		{
+			name:     "arch",
+			release:  "NAME=\"Arch Linux\"\nID=arch\n",
+			distro:   "arch",
+			provider: "libvirt",
+		},
+		{
+			name:     "arch derivative",
+			release:  "NAME=Manjaro\nID=manjaro\nID_LIKE=arch\n",
+			distro:   "manjaro",
+			provider: "unsupported",
+		},
+		{
 			name:     "debian",
 			release:  "NAME=Debian\nID=debian\n",
 			distro:   "debian",
@@ -87,7 +99,7 @@ func TestDetectPreservesMacOSProviderSelection(t *testing.T) {
 }
 
 func TestProviderRejectsUnsupportedLinuxDistribution(t *testing.T) {
-	for _, distro := range []string{"debian", "", "arch"} {
+	for _, distro := range []string{"debian", ""} {
 		_, err := Provider(Info{
 			OS:           "linux",
 			Architecture: "amd64",
@@ -110,6 +122,31 @@ func TestProviderRejectsUnsupportedLinuxDistribution(t *testing.T) {
 	}
 	if _, ok := p.(backend.Libvirt); !ok {
 		t.Fatalf("unexpected provider type %T", p)
+	}
+
+	p, err = Provider(Info{
+		OS:           "linux",
+		Architecture: "amd64",
+		Provider:     "libvirt",
+		Distribution: "arch",
+	}, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := p.(backend.Libvirt); !ok {
+		t.Fatalf("unexpected Arch provider type %T", p)
+	}
+
+	_, err = Provider(Info{OS: "linux", Architecture: "arm64", Provider: "unsupported", Distribution: "arch"}, nil, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "x86_64") {
+		t.Fatalf("unexpected Arch Linux ARM result: %v", err)
+	}
+}
+
+func TestDetectRejectsArchLinuxARM(t *testing.T) {
+	info := DetectBytes("linux", "arm64", []byte("ID=arch\n"))
+	if info.Provider != "unsupported" || info.DistributionFamily != "arch" {
+		t.Fatalf("unexpected Arch Linux ARM detection: %+v", info)
 	}
 }
 
