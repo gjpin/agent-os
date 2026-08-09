@@ -22,8 +22,8 @@ The project is intentionally conservative about trust boundaries:
   instruction paths linked to that canonical file;
 - OpenCode, Codex CLI, Claude Code, Pi, and GitHub Copilot CLI are preinstalled
   for the unprivileged `agent` user;
-- a complete development and operations toolset, including Node.js 24 and
-  Eclipse Temurin 25 JDK, is installed during first boot;
+- a complete development and operations toolset, including Node.js 24,
+  Eclipse Temurin 25 JDK, and Terraform, is installed during first boot;
 - `create --dry-run` generates provider artifacts without touching libvirt or
   Lima; normal create/start/stop/destroy operations are explicit.
 
@@ -58,8 +58,8 @@ Lima/aarch64. It includes standard shell and file utilities; Git and GitHub
 tools; Python, Go, Rust, Node.js 24, pnpm, Java 25, and native build toolchains;
 LLVM and GNU compilers/debuggers; Podman/Buildah/Skopeo; RPM development tools;
 networking and diagnostics; manuals and terminal tools; and Kubernetes 1.36,
-Helm, Kustomize, and OpenTofu clients. The canonical package inventory is in
-`internal/provision/provision.go`.
+Helm, Kustomize, OpenTofu, and Terraform clients. The canonical package
+inventory and first-boot installers are in `internal/provision/provision.go`.
 
 The `packages` config key, `--packages`, and `AGENT_OS_PACKAGES` specify
 additional packages. They are merged with the guaranteed baseline, sorted, and

@@ -186,10 +186,13 @@ func TestCodingAgentsScriptContainsRequiredInstallersAndSafetyControls(t *testin
 	}
 	for _, expected := range []string{
 		"set -euo pipefail",
+		"dnf install -y -- dnf-plugins-core",
+		"dnf config-manager addrepo --from-repofile=https://rpm.releases.hashicorp.com/fedora/hashicorp.repo",
+		"dnf install -y -- terraform",
 		"dnf install -y -- adoptium-temurin-java-repository",
 		"dnf config-manager setopt adoptium.enabled=1",
 		"dnf install -y -- temurin-25-jdk",
-		"for executable in node npm",
+		"for executable in node npm terraform",
 		"https://opencode.ai/install",
 		"https://chatgpt.com/codex/install.sh",
 		"https://claude.ai/install.sh",
@@ -213,13 +216,16 @@ func TestCodingAgentsScriptContainsRequiredInstallersAndSafetyControls(t *testin
 	if strings.Index(script, "if [ -f \"$ready_marker\" ]") > strings.Index(script, "dnf install") {
 		t.Fatal("idempotency guard runs after package installation")
 	}
+	pluginInstall := strings.Index(script, "dnf install -y -- dnf-plugins-core")
+	hashicorpRepository := strings.Index(script, "dnf config-manager addrepo --from-repofile=https://rpm.releases.hashicorp.com/fedora/hashicorp.repo")
+	terraformInstall := strings.Index(script, "dnf install -y -- terraform")
 	repositoryInstall := strings.Index(script, "dnf install -y -- adoptium-temurin-java-repository")
 	repositoryEnable := strings.Index(script, "dnf config-manager setopt adoptium.enabled=1")
 	jdkInstall := strings.Index(script, "dnf install -y -- temurin-25-jdk")
 	nodeValidation := strings.Index(script, "for executable in node npm")
 	npmInstall := strings.Index(script, "/usr/bin/npm install")
-	if !(repositoryInstall < repositoryEnable && repositoryEnable < jdkInstall && jdkInstall < nodeValidation && nodeValidation < npmInstall) {
-		t.Fatalf("provisioning commands are out of order: repository install=%d enable=%d JDK install=%d Node validation=%d npm install=%d", repositoryInstall, repositoryEnable, jdkInstall, nodeValidation, npmInstall)
+	if !(pluginInstall < hashicorpRepository && hashicorpRepository < terraformInstall && terraformInstall < repositoryInstall && repositoryInstall < repositoryEnable && repositoryEnable < jdkInstall && jdkInstall < nodeValidation && nodeValidation < npmInstall) {
+		t.Fatalf("provisioning commands are out of order: plugin install=%d HashiCorp repository=%d Terraform install=%d repository install=%d enable=%d JDK install=%d executable validation=%d npm install=%d", pluginInstall, hashicorpRepository, terraformInstall, repositoryInstall, repositoryEnable, jdkInstall, nodeValidation, npmInstall)
 	}
 	if strings.Contains(script, "nodejs26") || strings.Contains(script, "dnf install -y -- nodejs") {
 		t.Fatal("coding-agent bootstrap installs Node instead of using the baseline")

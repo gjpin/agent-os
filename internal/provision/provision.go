@@ -94,11 +94,15 @@ if [ -f "$ready_marker" ]; then
   exit 0
 fi
 
+dnf install -y -- dnf-plugins-core
+dnf config-manager addrepo --from-repofile=https://rpm.releases.hashicorp.com/fedora/hashicorp.repo
+dnf install -y -- terraform
+
 dnf install -y -- adoptium-temurin-java-repository
 dnf config-manager setopt adoptium.enabled=1
 dnf install -y -- temurin-25-jdk
 
-for executable in node npm; do
+for executable in node npm terraform; do
   resolved=$(command -v "$executable")
   test -x "$resolved"
 done
