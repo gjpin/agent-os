@@ -13,13 +13,14 @@ import (
 type AccessMode string
 
 const (
-	AccessLocal        AccessMode = "local"
-	AccessWireGuard    AccessMode = "wireguard"
-	DefaultVMName                 = "agents"
-	DefaultOrcaPort               = 6768
-	DefaultVMMemoryMiB            = 4096
-	DefaultVMDiskGiB              = 120
-	DefaultVMCPUs                 = 2
+	AccessLocal           AccessMode = "local"
+	AccessWireGuard       AccessMode = "wireguard"
+	DefaultVMName                    = "agents"
+	DefaultOrcaPort                  = 6768
+	DefaultVMMemoryMiB               = 4096
+	DefaultVMDiskGiB                 = 120
+	DefaultProfileDiskGiB            = 10
+	DefaultVMCPUs                    = 2
 )
 
 func (m AccessMode) Valid() bool { return m == AccessLocal || m == AccessWireGuard }
@@ -40,6 +41,7 @@ type Config struct {
 	VMCPUs             int
 	VMMemoryMiB        int
 	VMDiskGiB          int
+	ProfileDiskGiB     int
 	AccessMode         AccessMode
 	OrcaPort           int
 	WireGuardInterface string
@@ -58,6 +60,7 @@ func DefaultConfig(stateDir string) Config {
 		VMCPUs:            DefaultVMCPUs,
 		VMMemoryMiB:       DefaultVMMemoryMiB,
 		VMDiskGiB:         DefaultVMDiskGiB,
+		ProfileDiskGiB:    DefaultProfileDiskGiB,
 		AccessMode:        AccessLocal,
 		OrcaPort:          DefaultOrcaPort,
 		ReleaseRepository: "gjpin/agent-os",
@@ -80,6 +83,9 @@ func (c Config) Validate() error {
 	}
 	if c.VMDiskGiB < 20 {
 		problems = append(problems, "vm.disk_gib must be at least 20")
+	}
+	if c.ProfileDiskGiB < 1 {
+		problems = append(problems, "profiles.disk_gib must be a positive integer")
 	}
 	if !c.AccessMode.Valid() {
 		problems = append(problems, "access.mode must be local or wireguard")

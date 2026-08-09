@@ -68,6 +68,16 @@ func (l Libvirt) Create(ctx context.Context, spec Spec) error {
 	definition := libvirtDefinition(spec.Config, spec.Architecture)
 	definition.SecurityModel = libvirtSecurityModel()
 	definition.AgentInstructions = spec.AgentInstructions
+	profileInfo, _, profileFound, err := loadProfile(spec, l.Name())
+	if err != nil {
+		return err
+	}
+	definition.ProfileBackend = l.Name()
+	definition.ProfileDiskID = profileInfo.Metadata.DiskID
+	definition.ProfileDiskLabel = profileInfo.Metadata.Label
+	definition.ProfileDiskPath = profileInfo.DiskPath
+	definition.ProfileDiskSerial = profileInfo.Metadata.DiskID
+	definition.ProfileDiskFormat = !profileFound
 	artifactDir := filepath.Join(spec.Config.StateDir, "v1", "vms", spec.Config.VMName, "artifacts")
 	if err := os.MkdirAll(artifactDir, 0o700); err != nil {
 		return err
@@ -100,6 +110,9 @@ func (l Libvirt) Create(ctx context.Context, spec Spec) error {
 	}
 	if spec.DryRun {
 		return nil
+	}
+	if err := ensureLibvirtProfile(ctx, l.Runner, l.Out, l.Err, spec); err != nil {
+		return err
 	}
 	image, err := releases.FedoraServer44(spec.Architecture)
 	if err != nil {
@@ -633,12 +646,99 @@ func (l Libvirt) Destroy(ctx context.Context, name string) error {
 	if err := validateLibvirtVMName(name); err != nil {
 		return err
 	}
-	if err := command(l.Runner, ctx, "virsh", []string{"--connect", "qemu:///system", "destroy", name}, nil, l.Out, l.Err); err != nil {
-		// Undefine may still be safe if the domain is already stopped; the
-		// caller decides whether to continue based on this explicit error.
+	status, err := l.status(ctx, name)
+	if err != nil {
+		return err
+	}
+	if status.Lifecycle != model.StatusRunning && status.Lifecycle != model.StatusStopped {
+		return fmt.Errorf("cannot destroy VM in unknown provider state %q", status.Detail)
+	}
+	if status.Lifecycle == model.StatusRunning {
+		if err := command(l.Runner, ctx, "virsh", []string{"--connect", "qemu:///system", "destroy", name}, nil, l.Out, l.Err); err != nil {
+			return err
+		}
+	}
+	if err := l.detachProfileDiskIfAttached(ctx, name); err != nil {
 		return err
 	}
 	return command(l.Runner, ctx, "virsh", []string{"--connect", "qemu:///system", "undefine", name, "--remove-all-storage"}, nil, l.Out, l.Err)
+}
+
+func (l Libvirt) detachProfileDiskIfAttached(ctx context.Context, name string) error {
+	var listing bytes.Buffer
+	if err := command(l.Runner, ctx, "virsh", []string{"--connect", "qemu:///system", "domblklist", name, "--details"}, nil, &listing, l.Err); err != nil {
+		return fmt.Errorf("inspect libvirt disks before destroy: %w", err)
+	}
+	for _, line := range strings.Split(listing.String(), "\n") {
+		fields := strings.Fields(line)
+		for _, field := range fields {
+			if field == "vdb" {
+				if err := command(l.Runner, ctx, "virsh", []string{"--connect", "qemu:///system", "detach-disk", name, "vdb", "--config"}, nil, l.Out, l.Err); err != nil {
+					return fmt.Errorf("detach persistent profile disk: %w", err)
+				}
+				return nil
+			}
+		}
+	}
+	return nil
+}
+
+func (l Libvirt) SyncProfile(ctx context.Context, spec Spec, restore bool) error {
+	action := "sync"
+	if restore {
+		action = "restore"
+	}
+	return l.Exec(ctx, spec.Config.VMName, []string{provision.ProfileSyncPath, action}, nil, l.Out, l.Err)
+}
+
+func (l Libvirt) RefreshAgentInstructions(ctx context.Context, name, content string) error {
+	return l.Exec(ctx, name, []string{"/bin/bash", "-s"}, strings.NewReader(provision.AgentInstructionsScript(content)), l.Out, l.Err)
+}
+
+func (l Libvirt) DetachProfile(ctx context.Context, spec Spec) error {
+	_, _, found, err := loadProfile(spec, l.Name())
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	return command(l.Runner, ctx, "virsh", []string{"--connect", "qemu:///system", "detach-disk", spec.Config.VMName, "vdb", "--config"}, nil, l.Out, l.Err)
+}
+
+func (l Libvirt) PurgeProfile(ctx context.Context, spec Spec) error {
+	info, _, found, err := loadProfile(spec, l.Name())
+	if err != nil {
+		return err
+	}
+	if !found {
+		if _, err := os.Lstat(info.DiskPath); err == nil {
+			return errors.New("libvirt profile disk exists without trusted metadata; refusing to purge it")
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect libvirt profile disk: %w", err)
+		}
+		return nil
+	}
+	var domains bytes.Buffer
+	if err := command(l.Runner, ctx, "virsh", []string{"--connect", "qemu:///system", "list", "--all", "--name"}, nil, &domains, l.Err); err != nil {
+		return fmt.Errorf("verify libvirt profile disk detachment: %w", err)
+	}
+	for _, domain := range strings.Split(domains.String(), "\n") {
+		if strings.TrimSpace(domain) == spec.Config.VMName {
+			return errors.New("cannot purge profile while the VM domain still exists")
+		}
+	}
+	diskInfo, err := os.Lstat(info.DiskPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect libvirt profile disk: %w", err)
+	}
+	if err == nil && (diskInfo.Mode()&os.ModeSymlink != 0 || !diskInfo.Mode().IsRegular()) {
+		return errors.New("libvirt profile disk is not a regular file; refusing to purge it")
+	}
+	if err := os.Remove(info.DiskPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("delete libvirt profile disk: %w", err)
+	}
+	return purgeProfileMetadata(spec)
 }
 
 func (l Libvirt) Upgrade(ctx context.Context, name string, spec Spec) error {
@@ -665,6 +765,8 @@ func (l Libvirt) ExecAsUser(ctx context.Context, name, user string, args []strin
 		"HOME=" + provision.AgentHome,
 		"SHELL=/bin/bash",
 		"PATH=" + provision.AgentManagedPath,
+		"CODEX_HOME=" + provision.AgentHome + "/.codex",
+		"COPILOT_HOME=" + provision.AgentHome + "/.copilot",
 	}
 	commandArgs = append(commandArgs, args...)
 	return l.execGuest(ctx, name, commandArgs, stdin, stdout, stderr)

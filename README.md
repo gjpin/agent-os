@@ -14,6 +14,10 @@ The project is intentionally conservative about trust boundaries:
   not configuration values;
 - lifecycle state is stored at `$XDG_STATE_HOME/agent-os/v1/vms/<name>/state.json`
   with mode `0600`, atomic writes, and per-VM locks;
+- each VM name has an independent retained sparse profile disk (10 GiB by
+  default) and metadata at `$XDG_STATE_HOME/agent-os/v1/profiles/<name>/`;
+  agent settings, sessions, plugins, permissions, and authentication state
+  survive VM replacement, while host configuration never enters the disk;
 - host commands use argument arrays and contexts, never a shell command string;
 - Fedora Server and Orca RPM inputs are pinned to published SHA-256 digests
   before guest installation;
@@ -35,6 +39,7 @@ go run . config validate
 go run . setup-host
 go run . create --dry-run agents
 go run . start agents
+go run . destroy --yes --purge-profiles agents
 go run . completion zsh > ~/.zfunc/_agent-os
 ```
 
@@ -50,6 +55,11 @@ must be destroyed and recreated to receive the complete baseline; `upgrade`
 does not retrofit or refresh first-boot tools. If
 `internal/instructions/AGENTS.md` changes, rebuild the `agent-os` binary before
 creating new VMs.
+
+Set `profiles.disk_gib`, `--profile-disk-gib`, or
+`AGENT_OS_PROFILE_DISK_GIB` to change the profile disk minimum. Existing disks
+only grow. Ordinary `destroy` retains the disk; `destroy --purge-profiles`
+deletes it after confirmed shutdown and detachment.
 
 ## Guest toolset and extra packages
 

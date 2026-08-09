@@ -34,6 +34,12 @@ type VMDefinition struct {
 	AllowedCIDRs      []string
 	AgentInstructions string
 	RepositoryKeyPath string
+	ProfileBackend    string
+	ProfileDiskID     string
+	ProfileDiskLabel  string
+	ProfileDiskFormat bool
+	ProfileDiskPath   string
+	ProfileDiskSerial string
 }
 
 func FromConfig(c model.Config, architecture string) VMDefinition {
@@ -80,6 +86,20 @@ func LibvirtXML(def VMDefinition, diskPath, cloudInitPath string) (string, error
 	if def.MACAddress != "" {
 		mac = fmt.Sprintf("      <mac address=\"%s\"/>\n", xmlEscape(def.MACAddress))
 	}
+	profileDisk := ""
+	if def.ProfileDiskPath != "" {
+		serial := def.ProfileDiskSerial
+		if serial == "" {
+			serial = def.ProfileDiskID
+		}
+		profileDisk = fmt.Sprintf(`
+    <disk type="file" device="disk">
+      <driver name="qemu" type="qcow2" discard="unmap"/>
+      <source file="%s"/>
+      <target dev="vdb" bus="virtio"/>
+      <serial>%s</serial>
+    </disk>`, xmlEscape(def.ProfileDiskPath), xmlEscape(serial))
+	}
 	return fmt.Sprintf(`<domain type="kvm">
   <name>%s</name>
   <memory unit="MiB">%d</memory>
@@ -105,6 +125,7 @@ func LibvirtXML(def VMDefinition, diskPath, cloudInitPath string) (string, error
       <source file="%s"/>
       <target dev="vda" bus="virtio"/>
     </disk>
+%s
     <disk type="file" device="cdrom">
       <driver name="qemu" type="raw"/>
       <source file="%s"/>
@@ -126,7 +147,7 @@ func LibvirtXML(def VMDefinition, diskPath, cloudInitPath string) (string, error
     <serial type="pty"><target type="isa-serial" port="0"/></serial>
   </devices>
 </domain>
-`, name, def.MemoryMiB, def.MemoryMiB, def.CPUs, def.CPUs, securityModel(def.SecurityModel), architecture(def.Architecture), mac, disk, seed), nil
+`, name, def.MemoryMiB, def.MemoryMiB, def.CPUs, def.CPUs, securityModel(def.SecurityModel), architecture(def.Architecture), mac, disk, profileDisk, seed), nil
 }
 
 func architecture(value string) string {
@@ -135,6 +156,8 @@ func architecture(value string) string {
 	}
 	return value
 }
+
+func (def VMDefinition) ProfileDiskBackendFormat() bool { return def.ProfileDiskFormat }
 
 func securityModel(value string) string {
 	switch value {
@@ -180,6 +203,9 @@ func LimaYAML(def VMDefinition) (string, error) {
 	if def.ImagePath != "" {
 		fmt.Fprintf(&b, "images:\n  - location: %s\n    arch: %s\n", strconv.Quote(def.ImagePath), architecture(def.Architecture))
 	}
+	if def.ProfileDiskID != "" {
+		fmt.Fprintf(&b, "additionalDisks:\n  - name: %s\n    format: %t\n    fsType: ext4\n", strconv.Quote(def.ProfileDiskID), def.ProfileDiskBackendFormat())
+	}
 	agentInstructionsScript := provision.AgentInstructionsScript(def.AgentInstructions)
 	kindPodmanScript := provision.KindPodmanScript()
 	codingAgentsScript := provision.CodingAgentsScript()
@@ -191,6 +217,13 @@ func LimaYAML(def VMDefinition) (string, error) {
 	b.WriteString("mounts: []\nssh:\n  loadDotSSHPubKeys: false\n  forwardAgent: false\n\nprovision:\n  - mode: system\n    script: |")
 	b.WriteString("\n      set -eu\n      useradd --create-home --shell /bin/bash agent || true\n")
 	b.WriteString("      usermod --lock agent || true\n")
+	if def.ProfileDiskID != "" {
+		b.WriteString("      install -d -m 0755 /usr/local/libexec\n      cat > /usr/local/libexec/agent-os-profile-sync <<'AGENT_OS_PROFILE_SYNC'\n")
+		appendIndented(&b, provision.ProfileSyncScript(), "      ")
+		b.WriteString("      AGENT_OS_PROFILE_SYNC\n      chmod 0700 /usr/local/libexec/agent-os-profile-sync\n      cat > /usr/local/libexec/agent-os-profile-setup <<'AGENT_OS_PROFILE_SETUP'\n")
+		appendIndented(&b, provision.ProfileSetupScript(provision.ProfileMountSpec{Backend: "lima", DiskID: def.ProfileDiskID, Label: def.ProfileDiskLabel}), "      ")
+		b.WriteString("      AGENT_OS_PROFILE_SETUP\n      chmod 0700 /usr/local/libexec/agent-os-profile-setup\n      /bin/bash /usr/local/libexec/agent-os-profile-setup\n")
+	}
 	b.WriteString("      systemctl disable --now containerd.service 2>/dev/null || true\n")
 	if repositoryKeyScript != "" {
 		appendIndented(&b, repositoryKeyScript, "      ")
@@ -287,6 +320,12 @@ func cloudInit(def VMDefinition, repositoryKeyPath string) (string, error) {
 	appendIndented(&b, OrcaSystemdUnit(def.OrcaPort, def.BindAddress, def.PairingAddress), "      ")
 	b.WriteString("  - path: /usr/local/libexec/agent-os-provision-agent-instructions\n    permissions: '0700'\n    content: |\n")
 	appendIndented(&b, provision.AgentInstructionsScript(def.AgentInstructions), "      ")
+	if def.ProfileDiskID != "" {
+		b.WriteString("  - path: /usr/local/libexec/agent-os-profile-sync\n    permissions: '0700'\n    content: |\n")
+		appendIndented(&b, provision.ProfileSyncScript(), "      ")
+		b.WriteString("  - path: /usr/local/libexec/agent-os-profile-setup\n    permissions: '0700'\n    content: |\n")
+		appendIndented(&b, provision.ProfileSetupScript(provision.ProfileMountSpec{Backend: "libvirt", DiskID: def.ProfileDiskID, Label: def.ProfileDiskLabel}), "      ")
+	}
 	b.WriteString("  - path: /usr/local/libexec/agent-os-setup-kind-podman\n    permissions: '0700'\n    content: |\n")
 	appendIndented(&b, provision.KindPodmanScript(), "      ")
 	b.WriteString("  - path: /usr/local/libexec/agent-os-install-coding-agents\n    permissions: '0700'\n    content: |\n")
@@ -301,7 +340,11 @@ func cloudInit(def VMDefinition, repositoryKeyPath string) (string, error) {
 	appendIndented(&b, orcaInstallScript, "      ")
 	b.WriteString("  - path: /etc/systemd/system/agent-os-firewall.service\n    permissions: '0644'\n    content: |\n")
 	appendIndented(&b, FirewallSystemdUnit(), "      ")
-	b.WriteString("runcmd:\n  - [bash, /usr/local/libexec/agent-os-provision-agent-instructions]\n")
+	b.WriteString("runcmd:\n")
+	if def.ProfileDiskID != "" {
+		b.WriteString("  - [bash, /usr/local/libexec/agent-os-profile-setup]\n")
+	}
+	b.WriteString("  - [bash, /usr/local/libexec/agent-os-provision-agent-instructions]\n")
 	b.WriteString("  - [bash, /usr/local/libexec/agent-os-setup-kind-podman]\n")
 	b.WriteString("  - [bash, /usr/local/libexec/agent-os-install-coding-agents]\n")
 	b.WriteString("  - [bash, /usr/local/libexec/agent-os-install-orca]\n")

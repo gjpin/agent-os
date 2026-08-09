@@ -154,6 +154,7 @@ func (a *App) newRoot() *cobra.Command {
 	root.PersistentFlags().Int("vm-cpus", 0, "VM vCPUs (1-8)")
 	root.PersistentFlags().Int("vm-memory-mib", 0, "VM memory in MiB")
 	root.PersistentFlags().Int("vm-disk-gib", 0, "VM disk in GiB")
+	root.PersistentFlags().Int("profile-disk-gib", 0, "persistent agent profile disk in GiB")
 	root.PersistentFlags().String("access-mode", "", "access mode: local or wireguard")
 	root.PersistentFlags().Int("orca-port", 0, "Orca TCP port")
 	root.PersistentFlags().String("wireguard-interface", "", "existing host WireGuard interface")
@@ -210,6 +211,7 @@ func (a *App) collectFlagValues(cmd *cobra.Command) map[string]any {
 	add("vm-cpus", "vm.cpus")
 	add("vm-memory-mib", "vm.memory_mib")
 	add("vm-disk-gib", "vm.disk_gib")
+	add("profile-disk-gib", "profiles.disk_gib")
 	add("access-mode", "access.mode")
 	add("orca-port", "orca.port")
 	add("wireguard-interface", "wireguard.interface")
@@ -316,7 +318,14 @@ func (a *App) ensureStateDir(c model.Config) error {
 	if strings.TrimSpace(c.StateDir) == "" {
 		return errors.New("state directory is unset; set XDG_STATE_HOME or --state-dir")
 	}
-	return os.MkdirAll(filepath.Join(c.StateDir, "v1", "vms"), 0o700)
+	if err := os.MkdirAll(filepath.Join(c.StateDir, "v1", "vms"), 0o700); err != nil {
+		return err
+	}
+	profilesDir := filepath.Join(c.StateDir, "v1", "profiles")
+	if err := os.MkdirAll(profilesDir, 0o700); err != nil {
+		return err
+	}
+	return os.Chmod(profilesDir, 0o700)
 }
 
 func (a *App) emit(c model.Config, event, message string, fields map[string]any) {

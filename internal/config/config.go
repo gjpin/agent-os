@@ -27,6 +27,7 @@ var documentedEnv = map[string]string{
 	"vm.cpus":               "AGENT_OS_VM_CPUS",
 	"vm.memory_mib":         "AGENT_OS_VM_MEMORY_MIB",
 	"vm.disk_gib":           "AGENT_OS_VM_DISK_GIB",
+	"profiles.disk_gib":     "AGENT_OS_PROFILE_DISK_GIB",
 	"access.mode":           "AGENT_OS_ACCESS_MODE",
 	"orca.port":             "AGENT_OS_ORCA_PORT",
 	"wireguard.interface":   "AGENT_OS_WIREGUARD_INTERFACE",
@@ -154,6 +155,9 @@ func Load(opts LoadOptions) (Resolved, error) {
 	for key, value := range opts.FlagValues {
 		v.Set(key, value)
 	}
+	if err := validateIntegerValue(v.Get("profiles.disk_gib"), "profiles.disk_gib"); err != nil {
+		return Resolved{}, err
+	}
 
 	result := Resolved{
 		ConfigPath:  configPath,
@@ -175,6 +179,27 @@ func Load(opts LoadOptions) (Resolved, error) {
 		return Resolved{}, err
 	}
 	return result, nil
+}
+
+func validateIntegerValue(value any, key string) error {
+	valid := false
+	switch typed := value.(type) {
+	case int:
+		valid = true
+	case int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		valid = true
+	case float32, float64:
+		// A YAML/JSON fractional representation is not the documented
+		// integer configuration type, even when its numeric value is whole.
+		valid = false
+	case string:
+		_, err := strconv.Atoi(strings.TrimSpace(typed))
+		valid = err == nil
+	}
+	if !valid {
+		return fmt.Errorf("invalid configuration: %s must be a positive integer", key)
+	}
+	return nil
 }
 
 func promptCreateFields(result *Resolved, opts LoadOptions, env func(string) (string, bool), configFound bool, configPath string, v *viper.Viper) error {
@@ -306,6 +331,7 @@ func setDefaults(v *viper.Viper, c model.Config) {
 	v.SetDefault("vm.cpus", c.VMCPUs)
 	v.SetDefault("vm.memory_mib", c.VMMemoryMiB)
 	v.SetDefault("vm.disk_gib", c.VMDiskGiB)
+	v.SetDefault("profiles.disk_gib", c.ProfileDiskGiB)
 	v.SetDefault("access.mode", string(c.AccessMode))
 	v.SetDefault("orca.port", c.OrcaPort)
 	v.SetDefault("network.allowed_cidrs", []string{})
@@ -328,6 +354,7 @@ func readConfig(v *viper.Viper) model.Config {
 		VMCPUs:             v.GetInt("vm.cpus"),
 		VMMemoryMiB:        v.GetInt("vm.memory_mib"),
 		VMDiskGiB:          v.GetInt("vm.disk_gib"),
+		ProfileDiskGiB:     v.GetInt("profiles.disk_gib"),
 		AccessMode:         model.AccessMode(v.GetString("access.mode")),
 		OrcaPort:           v.GetInt("orca.port"),
 		WireGuardInterface: v.GetString("wireguard.interface"),
@@ -392,6 +419,7 @@ func (r Resolved) EffectiveValues() map[string]any {
 		"vm.cpus":               c.VMCPUs,
 		"vm.memory_mib":         c.VMMemoryMiB,
 		"vm.disk_gib":           c.VMDiskGiB,
+		"profiles.disk_gib":     c.ProfileDiskGiB,
 		"access.mode":           c.AccessMode,
 		"orca.port":             c.OrcaPort,
 		"wireguard.interface":   c.WireGuardInterface,
@@ -421,6 +449,7 @@ func (r Resolved) ConfigYAML() ([]byte, error) {
 	var b strings.Builder
 	b.WriteString("# agent-os configuration; secrets and confirmations do not belong here.\n")
 	fmt.Fprintf(&b, "vm:\n  name: %s\n  cpus: %d\n  memory_mib: %d\n  disk_gib: %d\n", r.Config.VMName, r.Config.VMCPUs, r.Config.VMMemoryMiB, r.Config.VMDiskGiB)
+	fmt.Fprintf(&b, "profiles:\n  disk_gib: %d\n", r.Config.ProfileDiskGiB)
 	fmt.Fprintf(&b, "access:\n  mode: %s\n", r.Config.AccessMode)
 	fmt.Fprintf(&b, "orca:\n  port: %d\n", r.Config.OrcaPort)
 	if r.Config.WireGuardInterface != "" || r.Config.WireGuardAddress != "" {

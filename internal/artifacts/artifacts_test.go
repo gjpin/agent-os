@@ -154,6 +154,48 @@ func TestGeneratedArtifactsDisableHostSharing(t *testing.T) {
 	_ = model.AccessLocal
 }
 
+func TestProfileArtifactsAttachSeparatePersistentDiskAndRouteState(t *testing.T) {
+	def := VMDefinition{
+		Name: "profile-vm", CPUs: 2, MemoryMiB: 4096, DiskGiB: 120,
+		Architecture: "x86_64", ProfileBackend: "libvirt",
+		ProfileDiskID:     "agent-os-profile-profile-vm-1234567890abcdef",
+		ProfileDiskLabel:  "agent-os-profile-vm-1234567890abcdef",
+		ProfileDiskPath:   "/state/v1/profiles/profile-vm/profile.qcow2",
+		ProfileDiskSerial: "agent-os-profile-profile-vm-1234567890abcdef",
+		ProfileDiskFormat: true,
+	}
+	xmlDefinition, err := LibvirtXML(def, "/state/root.qcow2", "/state/cloud-init.iso")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		`<source file="/state/v1/profiles/profile-vm/profile.qcow2"/>`,
+		`<target dev="vdb" bus="virtio"/>`,
+		`<serial>agent-os-profile-profile-vm-1234567890abcdef</serial>`,
+	} {
+		if !strings.Contains(xmlDefinition, expected) {
+			t.Errorf("libvirt profile disk omits %q: %s", expected, xmlDefinition)
+		}
+	}
+	lima, err := LimaYAML(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"additionalDisks:", "format: true", "fsType: ext4",
+		"/var/lib/agent-os/profile", "nodev,nosuid",
+		"/home/agent/.codex", "/home/agent/.agents", "/home/agent/.claude.json", "cli_auth_credentials_store = \"file\"",
+	} {
+		if !strings.Contains(lima, expected) {
+			t.Errorf("profile Lima artifact omits %q", expected)
+		}
+	}
+	cloudInit := CloudInit(def, "")
+	if !strings.Contains(cloudInit, "agent-os-profile-"+"profile-vm") || !strings.Contains(cloudInit, "UUID=$profile_uuid") {
+		t.Fatal("cloud-init did not contain the libvirt profile setup")
+	}
+}
+
 func TestLibvirtXMLSecurityModels(t *testing.T) {
 	for _, test := range []struct {
 		model string

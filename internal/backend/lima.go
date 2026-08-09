@@ -53,6 +53,14 @@ func (l Lima) EnsureNetwork(context.Context, Spec) error { return nil }
 func (l Lima) Create(ctx context.Context, spec Spec) error {
 	definition := artifacts.FromConfig(spec.Config, spec.Architecture)
 	definition.AgentInstructions = spec.AgentInstructions
+	profileInfo, _, profileFound, err := loadProfile(spec, l.Name())
+	if err != nil {
+		return err
+	}
+	definition.ProfileBackend = l.Name()
+	definition.ProfileDiskID = profileInfo.Metadata.DiskID
+	definition.ProfileDiskLabel = profileInfo.Metadata.Label
+	definition.ProfileDiskFormat = !profileFound
 	artifactDir := filepath.Join(spec.Config.StateDir, "v1", "vms", spec.Config.VMName, "artifacts")
 	if err := os.MkdirAll(artifactDir, 0o700); err != nil {
 		return err
@@ -74,6 +82,9 @@ func (l Lima) Create(ctx context.Context, spec Spec) error {
 	}
 	if spec.DryRun {
 		return nil
+	}
+	if err := ensureLimaProfile(ctx, l.Runner, l.Out, l.Err, spec); err != nil {
+		return err
 	}
 	if _, err := os.Stat(imagePath); err != nil {
 		if err := releases.DownloadVerified(ctx, l.Runner, image, imagePath, l.Out, l.Err); err != nil {
@@ -135,7 +146,45 @@ func (l Lima) Destroy(ctx context.Context, name string) error {
 	return command(l.Runner, ctx, "limactl", []string{"delete", name}, nil, l.Out, l.Err)
 }
 
+func (l Lima) SyncProfile(ctx context.Context, spec Spec, restore bool) error {
+	action := "sync"
+	if restore {
+		action = "restore"
+	}
+	return command(l.Runner, ctx, "limactl", []string{"shell", spec.Config.VMName, "--", "sudo", provision.ProfileSyncPath, action}, nil, l.Out, l.Err)
+}
+
+func (l Lima) RefreshAgentInstructions(ctx context.Context, name, content string) error {
+	return command(l.Runner, ctx, "limactl", []string{"shell", name, "--", "sudo", "/bin/bash", "-s"}, strings.NewReader(provision.AgentInstructionsScript(content)), l.Out, l.Err)
+}
+
+func (l Lima) DetachProfile(context.Context, Spec) error { return nil }
+
+func (l Lima) PurgeProfile(ctx context.Context, spec Spec) error {
+	info, _, found, err := loadProfile(spec, l.Name())
+	if err != nil {
+		return err
+	}
+	if !found {
+		present, _, err := limaDiskDetails(ctx, l.Runner, info.Metadata.DiskID, l.Err)
+		if err != nil {
+			return err
+		}
+		if present {
+			return fmt.Errorf("Lima profile disk %q exists without trusted metadata; refusing to purge it", info.Metadata.DiskID)
+		}
+		return nil
+	}
+	if err := command(l.Runner, ctx, "limactl", []string{"disk", "delete", info.Metadata.DiskID}, nil, l.Out, l.Err); err != nil {
+		return fmt.Errorf("delete Lima profile disk: %w", err)
+	}
+	return purgeProfileMetadata(spec)
+}
+
 func (l Lima) Upgrade(ctx context.Context, name string, spec Spec) error {
+	if err := ensureLimaProfile(ctx, l.Runner, l.Out, l.Err, spec); err != nil {
+		return err
+	}
 	return command(l.Runner, ctx, "limactl", []string{"shell", name, "sudo", "systemctl", "restart", "orca.service"}, nil, l.Out, l.Err)
 }
 
@@ -152,6 +201,8 @@ func (l Lima) ExecAsUser(ctx context.Context, name, user string, args []string, 
 		"HOME=" + provision.AgentHome,
 		"SHELL=/bin/bash",
 		"PATH=" + provision.AgentManagedPath,
+		"CODEX_HOME=" + provision.AgentHome + "/.codex",
+		"COPILOT_HOME=" + provision.AgentHome + "/.copilot",
 	}
 	commandArgs = append(commandArgs, args...)
 	return command(l.Runner, ctx, "limactl", commandArgs, stdin, stdout, stderr)

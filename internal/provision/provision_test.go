@@ -102,6 +102,22 @@ func TestAgentInstructionsScriptContainsAllManagedDestinations(t *testing.T) {
 	}
 }
 
+func TestProfileSetupScriptRoutesCrossAgentState(t *testing.T) {
+	script := ProfileSetupScript(ProfileMountSpec{
+		Backend: "libvirt",
+		DiskID:  "agent-os-profile-profile-vm-1234567890abcdef",
+		Label:   "agent-os-profile-vm-1234567890abcdef",
+	})
+	for _, expected := range []string{
+		`"$profile_root/agents"`,
+		`route_profile_tree /home/agent/.agents "$profile_root/agents"`,
+	} {
+		if !strings.Contains(script, expected) {
+			t.Errorf("profile setup script omits %q", expected)
+		}
+	}
+}
+
 func TestAgentInstructionsScriptIsIdempotentAndReplacesDestinations(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "home", "agent")
 	if err := os.MkdirAll(home, 0o755); err != nil {

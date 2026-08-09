@@ -49,6 +49,49 @@ func TestLoadPrecedenceAndSources(t *testing.T) {
 	if resolved.Config.VMDiskGiB != 120 || resolved.Sources["vm.disk_gib"] != SourceDefault {
 		t.Fatalf("default was not used: value=%d source=%s", resolved.Config.VMDiskGiB, resolved.Sources["vm.disk_gib"])
 	}
+	if resolved.Config.ProfileDiskGiB != 10 || resolved.Sources["profiles.disk_gib"] != SourceDefault {
+		t.Fatalf("profile disk default was not used: value=%d source=%s", resolved.Config.ProfileDiskGiB, resolved.Sources["profiles.disk_gib"])
+	}
+}
+
+func TestProfileDiskConfigPrecedenceAndValidation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("profiles:\n  disk_gib: 8\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := Load(LoadOptions{
+		ExplicitConfigPath: path,
+		EnvLookup: envMap(map[string]string{
+			"HOME":                      dir,
+			"XDG_STATE_HOME":            filepath.Join(dir, "state"),
+			"AGENT_OS_PROFILE_DISK_GIB": "12",
+		}),
+		FlagValues: map[string]any{"profiles.disk_gib": "14"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Config.ProfileDiskGiB != 14 || resolved.Sources["profiles.disk_gib"] != SourceFlag {
+		t.Fatalf("profile disk precedence failed: %+v", resolved)
+	}
+	for _, value := range []any{0, -1, "not-an-integer", 1.5} {
+		if _, err := Load(LoadOptions{EnvLookup: envMap(map[string]string{
+			"HOME":           dir,
+			"XDG_STATE_HOME": filepath.Join(dir, "state"),
+		}), FlagValues: map[string]any{"profiles.disk_gib": value}}); err == nil {
+			t.Fatalf("accepted invalid profile disk value %#v", value)
+		}
+	}
+	fractionalPath := filepath.Join(dir, "fractional.yaml")
+	if err := os.WriteFile(fractionalPath, []byte("profiles:\n  disk_gib: 1.5\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(LoadOptions{ExplicitConfigPath: fractionalPath, EnvLookup: envMap(map[string]string{
+		"HOME": dir, "XDG_STATE_HOME": filepath.Join(dir, "state"),
+	})}); err == nil {
+		t.Fatal("accepted fractional profile disk size from YAML")
+	}
 }
 
 func TestLoadDoesNotSearchCurrentDirectory(t *testing.T) {

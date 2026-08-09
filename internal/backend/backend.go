@@ -35,6 +35,20 @@ type Provider interface {
 	Exec(context.Context, string, []string, io.Reader, io.Writer, io.Writer) error
 }
 
+// ProfileLifecycle is implemented by providers that own the persistent
+// profile attachment. Keeping it separate preserves the provider interface
+// used by embedders and test doubles while allowing the CLI to enforce the
+// detach-before-destroy and sync-before-stop rules.
+type ProfileLifecycle interface {
+	SyncProfile(context.Context, Spec, bool) error
+	DetachProfile(context.Context, Spec) error
+	PurgeProfile(context.Context, Spec) error
+}
+
+type InstructionRefresher interface {
+	RefreshAgentInstructions(context.Context, string, string) error
+}
+
 // The narrower interfaces keep lifecycle, networking, forwarding,
 // provisioning, and inspection independently fakeable in unit tests. Provider
 // combines the operations needed by the CLI while implementations may expose

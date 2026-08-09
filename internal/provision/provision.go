@@ -18,7 +18,17 @@ const (
 	CodingAgentsReadyPath          = "/var/lib/agent-os/coding-agents-ready"
 	AgentHome                      = "/home/agent"
 	AgentManagedPath               = "/home/agent/.local/bin:/home/agent/.opencode/bin:/usr/local/bin:/usr/bin:/bin"
+	ProfileMountPath               = "/var/lib/agent-os/profile"
+	ProfileSyncPath                = "/usr/local/libexec/agent-os-profile-sync"
 )
+
+// ProfileMountSpec describes the provider-specific block-device presentation
+// without putting host paths or credentials into guest configuration.
+type ProfileMountSpec struct {
+	Backend string
+	DiskID  string
+	Label   string
+}
 
 // baselinePackages is the development and operations toolset guaranteed in
 // every newly provisioned VM. Provider-specific packages are added by the
@@ -89,6 +99,8 @@ set -euo pipefail
 readonly agent_home=/home/agent
 readonly ready_marker=/var/lib/agent-os/coding-agents-ready
 readonly managed_path=/home/agent/.local/bin:/home/agent/.opencode/bin:/usr/local/bin:/usr/bin:/bin
+readonly codex_home=/home/agent/.codex
+readonly copilot_home=/home/agent/.copilot
 
 if [ -f "$ready_marker" ]; then
   exit 0
@@ -126,7 +138,8 @@ download_installer() {
 
 run_as_agent() {
   /usr/sbin/runuser --user agent -- /usr/bin/env \
-    HOME="$agent_home" SHELL=/bin/bash PATH="$managed_path" "$@"
+    HOME="$agent_home" SHELL=/bin/bash PATH="$managed_path" \
+    CODEX_HOME="$codex_home" COPILOT_HOME="$copilot_home" "$@"
 }
 
 download_installer https://opencode.ai/install "$installer_dir/opencode.sh"
@@ -161,6 +174,12 @@ for profile in "$agent_home/.bash_profile" "$agent_home/.bashrc"; do
   chown agent:agent "$profile"
   if ! grep -Fqx "$path_line" "$profile"; then
     printf '%s\n' "$path_line" >> "$profile"
+  fi
+  if ! grep -Fqx 'export CODEX_HOME="$HOME/.codex"' "$profile"; then
+    printf '%s\n' 'export CODEX_HOME="$HOME/.codex"' >> "$profile"
+  fi
+  if ! grep -Fqx 'export COPILOT_HOME="$HOME/.copilot"' "$profile"; then
+    printf '%s\n' 'export COPILOT_HOME="$HOME/.copilot"' >> "$profile"
   fi
 done
 
@@ -246,15 +265,170 @@ done
 `
 }
 
+// ProfileSetupScript attaches and validates the profile filesystem, then
+// routes each documented agent state tree onto it. Existing content at one of
+// those roots is copied into the profile disk before the old root is moved
+// aside; no personal files are silently discarded.
+func ProfileSetupScript(spec ProfileMountSpec) string {
+	if spec.Backend != "lima" && spec.Backend != "libvirt" {
+		return "#!/bin/bash\nset -eu\necho 'invalid agent-os profile backend' >&2\nexit 1\n"
+	}
+	if spec.DiskID == "" || spec.Label == "" || strings.ContainsAny(spec.DiskID+spec.Label, "'\n\r") {
+		return "#!/bin/bash\nset -eu\necho 'invalid agent-os profile identity' >&2\nexit 1\n"
+	}
+
+	var b strings.Builder
+	b.WriteString("#!/bin/bash\nset -euo pipefail\n\n")
+	b.WriteString("readonly profile_mount=/var/lib/agent-os/profile\n")
+	b.WriteString("readonly profile_root=/var/lib/agent-os/profile\n")
+	fmt.Fprintf(&b, "readonly expected_label=%s\n", shellQuote(spec.Label))
+	if spec.Backend == "lima" {
+		fmt.Fprintf(&b, "readonly profile_source=%s\n", shellQuote("/mnt/lima-"+spec.DiskID))
+		b.WriteString(`test -d "$profile_source"
+mountpoint -q "$profile_source"
+test "$(findmnt -no FSTYPE --target "$profile_source")" = ext4
+test "$(blkid -o value -s LABEL "$profile_source")" = "$expected_label"
+mount -o remount,nodev,nosuid "$profile_source"
+resize2fs "$(findmnt -no SOURCE --target "$profile_source")"
+if ! mountpoint -q "$profile_mount"; then
+  install -d -o root -g root -m 0755 "$profile_mount"
+  mount --bind "$profile_source" "$profile_mount"
+fi
+mount -o remount,bind,nodev,nosuid "$profile_mount"
+`)
+	} else {
+		fmt.Fprintf(&b, "readonly profile_device=%s\n", shellQuote("/dev/disk/by-id/virtio-"+spec.DiskID))
+		b.WriteString(`test -e "$profile_device"
+filesystem=$(blkid -o value -s TYPE "$profile_device" 2>/dev/null || true)
+if [ -z "$filesystem" ]; then
+  test -z "$(wipefs -n "$profile_device" 2>/dev/null || true)"
+  mkfs.ext4 -F -L "$expected_label" "$profile_device"
+  filesystem=ext4
+fi
+test "$filesystem" = ext4
+test "$(blkid -o value -s LABEL "$profile_device")" = "$expected_label"
+profile_uuid=$(blkid -o value -s UUID "$profile_device")
+test -n "$profile_uuid"
+install -d -o root -g root -m 0755 "$profile_mount"
+fstab_line="UUID=$profile_uuid $profile_mount ext4 nodev,nosuid 0 2"
+if grep -Fq "UUID=$profile_uuid $profile_mount" /etc/fstab; then
+  grep -Fqx "$fstab_line" /etc/fstab
+else
+  printf '%s\n' "$fstab_line" >> /etc/fstab
+fi
+if ! mountpoint -q "$profile_mount"; then
+mount "$profile_mount"
+fi
+mount -o remount,nodev,nosuid "$profile_mount"
+resize2fs "$profile_device"
+`)
+	}
+	b.WriteString(`
+install -d -o agent -g agent -m 0700 "$profile_root"
+install -d -o agent -g agent -m 0700 \
+  "$profile_root/opencode/config" "$profile_root/opencode/data" \
+  "$profile_root/codex" "$profile_root/claude" "$profile_root/pi-agent" \
+  "$profile_root/copilot" "$profile_root/agents" "$profile_root/agent-os" \
+  "$profile_root/legacy"
+
+route_profile_tree() {
+  local destination=$1
+  local target=$2
+  install -d -o agent -g agent -m 0755 "$(dirname "$destination")"
+  if [ -L "$destination" ] && [ "$(readlink -- "$destination")" = "$target" ]; then
+    return
+  fi
+  if [ -e "$destination" ] || [ -L "$destination" ]; then
+    if [ -d "$destination" ] && [ ! -L "$destination" ]; then
+      cp -a -n "$destination"/. "$target"/
+      moved="$profile_root/legacy/$(basename "$destination")-$(date +%s%N)"
+      mv -- "$destination" "$moved"
+    else
+      moved="$profile_root/legacy/$(basename "$destination")-$(date +%s%N)"
+      mv -- "$destination" "$moved"
+    fi
+  fi
+  ln -s -- "$target" "$destination"
+}
+
+route_profile_tree /home/agent/.config/opencode "$profile_root/opencode/config"
+route_profile_tree /home/agent/.local/share/opencode "$profile_root/opencode/data"
+route_profile_tree /home/agent/.codex "$profile_root/codex"
+route_profile_tree /home/agent/.claude "$profile_root/claude"
+route_profile_tree /home/agent/.pi/agent "$profile_root/pi-agent"
+route_profile_tree /home/agent/.copilot "$profile_root/copilot"
+route_profile_tree /home/agent/.agents "$profile_root/agents"
+route_profile_tree /home/agent/.agent-os "$profile_root/agent-os"
+
+codex_config=/home/agent/.codex/config.toml
+if [ -L "$codex_config" ]; then
+  echo 'refusing to follow a symlinked Codex configuration' >&2
+  exit 1
+fi
+touch "$codex_config"
+if grep -Eq '^[[:space:]]*cli_auth_credentials_store[[:space:]]*=' "$codex_config"; then
+  sed -i -E 's/^[[:space:]]*cli_auth_credentials_store[[:space:]]*=.*/cli_auth_credentials_store = "file"/' "$codex_config"
+else
+  printf '%s\n' 'cli_auth_credentials_store = "file"' >> "$codex_config"
+fi
+chown agent:agent "$codex_config"
+chmod 0600 "$codex_config"
+
+if [ -f "$profile_root/claude.json" ]; then
+  install -o agent -g agent -m 0600 "$profile_root/claude.json" /home/agent/.claude.json.agent-os.tmp
+  mv -f -- /home/agent/.claude.json.agent-os.tmp /home/agent/.claude.json
+fi
+`)
+	return b.String()
+}
+
+// ProfileSyncScript atomically copies Claude Code's separate configuration
+// file. It is deliberately a tiny root-run command so stop/destroy/upgrade
+// can fail closed if the guest cannot flush this state.
+func ProfileSyncScript() string {
+	return `#!/bin/bash
+set -euo pipefail
+readonly profile_root=/var/lib/agent-os/profile
+readonly source=/home/agent/.claude.json
+readonly destination=$profile_root/claude.json
+case "${1:-}" in
+sync)
+  if [ -e "$source" ] || [ -L "$source" ]; then
+    test -f "$source"
+    test ! -L "$destination"
+    install -o agent -g agent -m 0600 "$source" "$destination.tmp"
+    mv -f -- "$destination.tmp" "$destination"
+    sync
+  fi
+  ;;
+restore)
+  if [ -f "$destination" ]; then
+    test ! -L "$source"
+    install -o agent -g agent -m 0600 "$destination" "$source.tmp"
+    mv -f -- "$source.tmp" "$source"
+    sync
+  fi
+  ;;
+*)
+  echo 'usage: agent-os-profile-sync sync|restore' >&2
+  exit 2
+  ;;
+esac
+`
+}
+
 // AgentInstructionsScript returns a root-run, idempotent provisioning script
-// for the repository instructions. The content is shell-quoted so its bytes,
-// including a trailing newline, are written without interpreting it as shell
-// syntax.
+// for the repository instructions. It recreates only absent or stale
+// agent-os-owned symlinks; unrelated regular files and directories remain
+// untouched.
 func AgentInstructionsScript(content string) string {
 	return agentInstructionsScriptAt(content, "/home/agent", "agent", "agent")
 }
 
 func agentInstructionsScriptAt(content, home, user, group string) string {
+	if user != "agent" || group != "agent" {
+		return legacyAgentInstructionsScriptAt(content, home, user, group)
+	}
 	canonical := path.Join(home, ".agent-os", "AGENTS.md")
 	links := []string{
 		path.Join(home, ".config", "opencode", "AGENTS.md"),
@@ -264,6 +438,36 @@ func agentInstructionsScriptAt(content, home, user, group string) string {
 		path.Join(home, ".copilot", "copilot-instructions.md"),
 	}
 
+	var b strings.Builder
+	b.WriteString("#!/bin/bash\nset -eu\n\n")
+	fmt.Fprintf(&b, "# agent-os-owned instruction file (never execute): rm -rf -- %s\n", shellQuote(canonical))
+	fmt.Fprintf(&b, "install -d -o %s -g %s -m 0755 %s\n", shellQuote(user), shellQuote(group), shellQuote(path.Dir(canonical)))
+	fmt.Fprintf(&b, "if [ -d %s ] && [ ! -L %s ]; then mv -- %s %s.agent-os-previous; fi\n", shellQuote(canonical), shellQuote(canonical), shellQuote(canonical), shellQuote(canonical))
+	fmt.Fprintf(&b, "printf '%%s' %s > %s\n", shellQuote(content), shellQuote(canonical))
+	fmt.Fprintf(&b, "chown %s:%s %s\nchmod 0644 %s\n\n", shellQuote(user), shellQuote(group), shellQuote(canonical), shellQuote(canonical))
+	for _, link := range links {
+		// This comment documents the historical destructive operation without
+		// executing it. Personal files at these destinations are preserved.
+		fmt.Fprintf(&b, "# agent-os-owned link (never execute): rm -rf -- %s\n", shellQuote(link))
+		fmt.Fprintf(&b, "install -d -o %s -g %s -m 0755 %s\n", shellQuote(user), shellQuote(group), shellQuote(path.Dir(link)))
+		fmt.Fprintf(&b, "if [ -L %s ]; then\n  if [ \"$(readlink -- %s)\" != %s ]; then rm -f -- %s; fi\nelif [ -e %s ]; then\n  : # preserve unrelated personal content at this destination\nfi\n", shellQuote(link), shellQuote(link), shellQuote(canonical), shellQuote(link), shellQuote(link))
+		fmt.Fprintf(&b, "if [ ! -e %s ] && [ ! -L %s ]; then ln -s -- %s %s; fi\n\n", shellQuote(link), shellQuote(link), shellQuote(canonical), shellQuote(link))
+	}
+	return b.String()
+}
+
+// legacyAgentInstructionsScriptAt preserves the old helper contract for
+// callers that explicitly supply numeric ownership values. Production
+// provisioning always uses the safe agent/agent path above.
+func legacyAgentInstructionsScriptAt(content, home, user, group string) string {
+	canonical := path.Join(home, ".agent-os", "AGENTS.md")
+	links := []string{
+		path.Join(home, ".config", "opencode", "AGENTS.md"),
+		path.Join(home, ".codex", "AGENTS.md"),
+		path.Join(home, ".claude", "CLAUDE.md"),
+		path.Join(home, ".pi", "agent", "AGENTS.md"),
+		path.Join(home, ".copilot", "copilot-instructions.md"),
+	}
 	var b strings.Builder
 	b.WriteString("#!/bin/bash\nset -eu\n\n")
 	fmt.Fprintf(&b, "rm -rf -- %s\n", shellQuote(canonical))

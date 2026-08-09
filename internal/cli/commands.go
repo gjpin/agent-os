@@ -410,6 +410,11 @@ func (a *App) createCommand() *cobra.Command {
 				return err
 			}
 			return store.WithLock(cmd.Context(), c.VMName, func() error {
+				if existing, loadErr := store.Load(c.VMName); loadErr == nil && existing.Provider != p.Name() {
+					return fmt.Errorf("VM state belongs to provider %q, refusing to create it with provider %q", existing.Provider, p.Name())
+				} else if loadErr != nil && !errors.Is(loadErr, os.ErrNotExist) {
+					return fmt.Errorf("load existing VM state: %w", loadErr)
+				}
 				value := state.State{SchemaVersion: state.SchemaVersion, Name: c.VMName, Provider: p.Name(), Lifecycle: model.StatusCreating}
 				if err := store.Save(value); err != nil {
 					return err
@@ -462,7 +467,22 @@ func (a *App) lifecycleCommand(action string) *cobra.Command {
 						}
 					}
 					opErr = p.Start(cmd.Context(), c.VMName)
+					if opErr == nil {
+						if refresher, ok := p.(backend.InstructionRefresher); ok {
+							opErr = refresher.RefreshAgentInstructions(cmd.Context(), c.VMName, a.agentInstructions)
+						}
+					}
+					if opErr == nil {
+						if profiles, ok := p.(backend.ProfileLifecycle); ok {
+							opErr = profiles.SyncProfile(cmd.Context(), a.backendSpec(c, false), true)
+						}
+					}
 				} else {
+					if profiles, ok := p.(backend.ProfileLifecycle); ok {
+						if err := profiles.SyncProfile(cmd.Context(), a.backendSpec(c, false), false); err != nil {
+							return fmt.Errorf("sync persistent profile before stop: %w", err)
+						}
+					}
 					opErr = p.Stop(cmd.Context(), c.VMName)
 				}
 				if opErr != nil {
@@ -672,6 +692,11 @@ func (a *App) upgradeCommand() *cobra.Command {
 			if _, err := store.Load(c.VMName); err != nil {
 				return err
 			}
+			if profiles, ok := p.(backend.ProfileLifecycle); ok {
+				if err := profiles.SyncProfile(cmd.Context(), a.backendSpec(c, false), false); err != nil {
+					return fmt.Errorf("sync persistent profile before upgrade: %w", err)
+				}
+			}
 			return p.Upgrade(cmd.Context(), c.VMName, a.backendSpec(c, false))
 		},
 	}
@@ -680,14 +705,18 @@ func (a *App) upgradeCommand() *cobra.Command {
 }
 
 func (a *App) destroyCommand() *cobra.Command {
-	var yes, force bool
+	var yes, force, purgeProfiles bool
 	cmd := &cobra.Command{
 		Use:   "destroy [name]",
 		Short: "Destroy a VM and its provider resources",
 		Args:  func(cmd *cobra.Command, args []string) error { return a.nameArgs(cmd, args) },
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !yes && !force {
-				if err := confirm(a.In, a.Out, isTTY(a.In), "destroy the VM and its persistent disk"); err != nil {
+				prompt := "destroy the VM and retain its persistent profile disk"
+				if purgeProfiles {
+					prompt = "destroy the VM and permanently delete its persistent profile disk"
+				}
+				if err := confirm(a.In, a.Out, isTTY(a.In), prompt); err != nil {
 					return err
 				}
 			}
@@ -696,13 +725,85 @@ func (a *App) destroyCommand() *cobra.Command {
 				return err
 			}
 			return store.WithLock(cmd.Context(), c.VMName, func() error {
+				stopped := false
+				profiles, hasProfiles := p.(backend.ProfileLifecycle)
+				profileSynced := true
+				providerDestroyNeeded := true
+				if status, statusErr := p.Status(cmd.Context(), c.VMName); statusErr == nil {
+					switch status.Lifecycle {
+					case model.StatusStopped:
+						stopped = true
+					case model.StatusRunning:
+						if hasProfiles {
+							if err := profiles.SyncProfile(cmd.Context(), a.backendSpec(c, false), false); err != nil {
+								profileSynced = false
+								if !force {
+									return fmt.Errorf("sync persistent profile before destroy: %w", err)
+								}
+							}
+						}
+						if err := p.Stop(cmd.Context(), c.VMName); err != nil {
+							if !force {
+								return fmt.Errorf("stop VM before destroy: %w", err)
+							}
+						} else if err := waitForStopped(cmd.Context(), p, c.VMName); err != nil {
+							if !force {
+								return err
+							}
+						} else {
+							stopped = true
+						}
+					case model.StatusUnknown:
+						if purgeProfiles {
+							stopped = true
+							providerDestroyNeeded = false
+						} else if !force {
+							return errors.New("verify VM state before destroy: provider returned unknown state")
+						}
+					}
+				} else if purgeProfiles {
+					// A normal destroy removes the VM state but intentionally
+					// retains the profile. Purge is therefore also allowed as a
+					// follow-up command; each provider's purge operation verifies
+					// that no domain/instance still owns the disk.
+					stopped = true
+					providerDestroyNeeded = false
+				} else if !force {
+					return fmt.Errorf("verify VM state before destroy: %w", statusErr)
+				}
 				if forwarding, ok := p.(backend.Forwarding); ok {
 					if err := forwarding.RemoveForwarding(cmd.Context(), a.backendSpec(c, false)); err != nil && !force {
 						return err
 					}
 				}
-				if err := p.Destroy(cmd.Context(), c.VMName); err != nil && !force {
-					return err
+				detached := true
+				if hasProfiles && providerDestroyNeeded {
+					if err := profiles.DetachProfile(cmd.Context(), a.backendSpec(c, false)); err != nil {
+						detached = false
+						if !force {
+							return fmt.Errorf("detach persistent profile before destroy: %w", err)
+						}
+					}
+				}
+				destroyed := true
+				if providerDestroyNeeded {
+					if err := p.Destroy(cmd.Context(), c.VMName); err != nil {
+						destroyed = false
+						if !force {
+							return err
+						}
+					}
+				}
+				if purgeProfiles {
+					if !hasProfiles {
+						return errors.New("provider does not support profile purge")
+					}
+					if !profileSynced || !stopped || !detached || !destroyed {
+						return errors.New("refusing to purge profile: shutdown, synchronization, and detachment were not confirmed")
+					}
+					if err := profiles.PurgeProfile(cmd.Context(), a.backendSpec(c, false)); err != nil {
+						return err
+					}
 				}
 				if err := store.Delete(c.VMName); err != nil {
 					return err
@@ -714,7 +815,32 @@ func (a *App) destroyCommand() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&yes, "yes", false, "confirm destruction non-interactively")
 	cmd.Flags().BoolVar(&force, "force", false, "continue after provider deletion errors; never read from config or environment")
+	cmd.Flags().BoolVar(&purgeProfiles, "purge-profiles", false, "permanently delete the retained profile disk after safe detachment")
 	return cmd
+}
+
+func waitForStopped(ctx context.Context, p backend.Provider, name string) error {
+	deadline, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	for {
+		status, err := p.Status(deadline, name)
+		if err != nil {
+			return fmt.Errorf("verify VM shutdown: %w", err)
+		}
+		if status.Lifecycle == model.StatusStopped {
+			return nil
+		}
+		if status.Lifecycle == model.StatusUnknown {
+			return errors.New("verify VM shutdown: provider returned unknown state")
+		}
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-deadline.Done():
+			timer.Stop()
+			return fmt.Errorf("timed out waiting for VM shutdown: %w", deadline.Err())
+		case <-timer.C:
+		}
+	}
 }
 
 func (a *App) configCommand() *cobra.Command {
