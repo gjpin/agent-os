@@ -3,6 +3,7 @@ package backend
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/gjpin/agent-os/internal/execx"
 	"github.com/gjpin/agent-os/internal/logging"
 	"github.com/gjpin/agent-os/internal/model"
+	"github.com/gjpin/agent-os/internal/provision"
 	"github.com/gjpin/agent-os/internal/releases"
 )
 
@@ -82,7 +84,27 @@ func (l Lima) Create(ctx context.Context, spec Spec) error {
 }
 
 func (l Lima) Start(ctx context.Context, name string) error {
-	return command(l.Runner, ctx, "limactl", []string{"start", name}, nil, l.Out, l.Err)
+	readyCtx, cancel := context.WithTimeout(ctx, provisioningTimeout)
+	defer cancel()
+	if err := command(l.Runner, readyCtx, "limactl", []string{"start", name}, nil, l.Out, l.Err); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if errors.Is(readyCtx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("timed out after %s waiting for required VM provisioning: %w", provisioningTimeout, context.DeadlineExceeded)
+		}
+		return fmt.Errorf("required Lima provisioning failed: %w", err)
+	}
+	if err := command(l.Runner, readyCtx, "limactl", []string{"shell", name, "--", "sudo", "/usr/bin/test", "-f", provision.CodingAgentsReadyPath}, nil, io.Discard, l.Err); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if errors.Is(readyCtx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("timed out after %s waiting for required VM provisioning: %w", provisioningTimeout, context.DeadlineExceeded)
+		}
+		return fmt.Errorf("coding-agent readiness marker %s is missing: %w", provision.CodingAgentsReadyPath, err)
+	}
+	return nil
 }
 
 func (l Lima) Stop(ctx context.Context, name string) error {
@@ -125,6 +147,12 @@ func (l Lima) ExecAsUser(ctx context.Context, name, user string, args []string, 
 	if user != "agent" {
 		return fmt.Errorf("unsupported guest user %q", user)
 	}
-	commandArgs := append([]string{"shell", name, "--", "sudo", "-u", user, "--"}, args...)
+	commandArgs := []string{
+		"shell", name, "--", "sudo", "-u", user, "--", "/usr/bin/env",
+		"HOME=" + provision.AgentHome,
+		"SHELL=/bin/bash",
+		"PATH=" + provision.AgentManagedPath,
+	}
+	commandArgs = append(commandArgs, args...)
 	return command(l.Runner, ctx, "limactl", commandArgs, stdin, stdout, stderr)
 }

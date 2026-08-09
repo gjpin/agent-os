@@ -15,7 +15,86 @@ const (
 	AgentInstructionsClaudePath    = "/home/agent/.claude/CLAUDE.md"
 	AgentInstructionsPiPath        = "/home/agent/.pi/agent/AGENTS.md"
 	AgentInstructionsCopilotPath   = "/home/agent/.copilot/copilot-instructions.md"
+	CodingAgentsReadyPath          = "/var/lib/agent-os/coding-agents-ready"
+	AgentHome                      = "/home/agent"
+	AgentManagedPath               = "/home/agent/.local/bin:/home/agent/.opencode/bin:/usr/local/bin:/usr/bin:/bin"
 )
+
+// CodingAgentsScript returns the root-run, idempotent installer for the five
+// coding agents included in every VM. Upstream installers intentionally select
+// their latest release at first boot; the marker prevents a later provisioning
+// replay from unexpectedly upgrading an existing VM.
+func CodingAgentsScript() string {
+	return `#!/bin/bash
+set -euo pipefail
+
+readonly agent_home=/home/agent
+readonly ready_marker=/var/lib/agent-os/coding-agents-ready
+readonly managed_path=/home/agent/.local/bin:/home/agent/.opencode/bin:/usr/local/bin:/usr/bin:/bin
+
+if [ -f "$ready_marker" ]; then
+  exit 0
+fi
+
+dnf install -y -- nodejs26 nodejs26-npm
+install -d -o agent -g agent -m 0755 "$agent_home/.local/bin" "$agent_home/.opencode/bin"
+
+installer_dir=$(mktemp -d /tmp/agent-os-coding-agents.XXXXXX)
+cleanup() {
+  rm -rf -- "$installer_dir"
+}
+trap cleanup EXIT
+chmod 0755 "$installer_dir"
+
+download_installer() {
+  local url=$1
+  local destination=$2
+  curl --fail --silent --show-error --location \
+    --retry 5 --retry-delay 2 --retry-all-errors \
+    --output "$destination" "$url"
+  chmod 0644 "$destination"
+}
+
+run_as_agent() {
+  /usr/sbin/runuser --user agent -- /usr/bin/env \
+    HOME="$agent_home" SHELL=/bin/bash PATH="$managed_path" "$@"
+}
+
+download_installer https://opencode.ai/install "$installer_dir/opencode.sh"
+run_as_agent /bin/bash "$installer_dir/opencode.sh" --no-modify-path
+
+download_installer https://chatgpt.com/codex/install.sh "$installer_dir/codex.sh"
+run_as_agent /usr/bin/env CODEX_INSTALL_DIR="$agent_home/.local/bin" \
+  /bin/sh "$installer_dir/codex.sh"
+
+download_installer https://claude.ai/install.sh "$installer_dir/claude.sh"
+run_as_agent /bin/bash "$installer_dir/claude.sh" latest
+
+run_as_agent /usr/bin/npm install --global --ignore-scripts \
+  --prefix "$agent_home/.local" @earendil-works/pi-coding-agent
+
+download_installer https://gh.io/copilot-install "$installer_dir/copilot.sh"
+run_as_agent /usr/bin/env PREFIX="$agent_home/.local" \
+  /bin/bash "$installer_dir/copilot.sh"
+
+for executable in opencode codex claude pi copilot; do
+  run_as_agent /bin/sh -c 'resolved=$(command -v "$1") && test -x "$resolved"' sh "$executable"
+done
+
+readonly path_line='export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"'
+for profile in "$agent_home/.bash_profile" "$agent_home/.bashrc"; do
+  touch "$profile"
+  chown agent:agent "$profile"
+  if ! grep -Fqx "$path_line" "$profile"; then
+    printf '%s\n' "$path_line" >> "$profile"
+  fi
+done
+
+install -d -o root -g root -m 0755 /var/lib/agent-os
+touch "$ready_marker"
+chmod 0644 "$ready_marker"
+`
+}
 
 // AgentInstructionsScript returns a root-run, idempotent provisioning script
 // for the repository instructions. The content is shell-quoted so its bytes,

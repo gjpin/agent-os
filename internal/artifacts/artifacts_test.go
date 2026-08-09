@@ -340,6 +340,33 @@ func TestAgentInstructionsAreIncludedInProviderArtifacts(t *testing.T) {
 	}
 }
 
+func TestCodingAgentsInstallerIsOrderedBeforeOrcaForEveryProvider(t *testing.T) {
+	def := VMDefinition{Name: "agents", CPUs: 2, MemoryMiB: 4096, DiskGiB: 120, Architecture: "x86_64"}
+	cloudInit := CloudInit(def, "")
+	lima, err := LimaYAML(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, artifact := range map[string]string{"cloud-init": cloudInit, "Lima": lima} {
+		instructions := strings.Index(artifact, "agent-os-provision-agent-instructions")
+		agents := strings.Index(artifact, "agent-os-install-coding-agents")
+		orca := strings.Index(artifact, "agent-os-install-orca")
+		if instructions < 0 || agents < 0 || orca < 0 || !(instructions < agents && agents < orca) {
+			t.Fatalf("%s provisioning order is instructions=%d agents=%d orca=%d", name, instructions, agents, orca)
+		}
+		for _, endpoint := range []string{
+			"https://opencode.ai/install",
+			"https://chatgpt.com/codex/install.sh",
+			"https://claude.ai/install.sh",
+			"https://gh.io/copilot-install",
+		} {
+			if !strings.Contains(artifact, endpoint) {
+				t.Errorf("%s artifact omits %s", name, endpoint)
+			}
+		}
+	}
+}
+
 func TestForwardingArtifactsUseHostEndpoint(t *testing.T) {
 	c := model.DefaultConfig("/state")
 	c.VMName = "agents"

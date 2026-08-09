@@ -19,6 +19,7 @@ import (
 	"github.com/gjpin/agent-os/internal/execx"
 	"github.com/gjpin/agent-os/internal/logging"
 	"github.com/gjpin/agent-os/internal/model"
+	"github.com/gjpin/agent-os/internal/provision"
 	"github.com/gjpin/agent-os/internal/releases"
 )
 
@@ -34,6 +35,11 @@ const (
 )
 
 var guestAgentPollInterval = 100 * time.Millisecond
+
+var (
+	provisioningTimeout      = 15 * time.Minute
+	provisioningPollInterval = time.Second
+)
 
 func (l Libvirt) Name() string { return "libvirt" }
 
@@ -527,7 +533,47 @@ func (l Libvirt) Start(ctx context.Context, name string) error {
 	if err := l.verifyLibvirtDomainSecurityTranslation(ctx, name); err != nil {
 		return err
 	}
-	return command(l.Runner, ctx, "virsh", []string{"--connect", "qemu:///system", "start", name}, nil, l.Out, l.Err)
+	if err := command(l.Runner, ctx, "virsh", []string{"--connect", "qemu:///system", "start", name}, nil, l.Out, l.Err); err != nil {
+		return err
+	}
+	readyCtx, cancel := context.WithTimeout(ctx, provisioningTimeout)
+	defer cancel()
+	if err := l.waitForProvisioning(readyCtx, name); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if errors.Is(readyCtx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("timed out after %s waiting for required VM provisioning: %w", provisioningTimeout, context.DeadlineExceeded)
+		}
+		return fmt.Errorf("required VM provisioning failed: %w", err)
+	}
+	return nil
+}
+
+func (l Libvirt) waitForProvisioning(ctx context.Context, name string) error {
+	// The guest agent starts before cloud-init necessarily finishes. Wait for
+	// that management channel first, then let cloud-init report its own failure
+	// and finally require the coding-agent installer marker.
+	for {
+		err := l.Exec(ctx, name, []string{"/usr/bin/true"}, nil, io.Discard, io.Discard)
+		if err == nil {
+			break
+		}
+		timer := time.NewTimer(provisioningPollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	if err := l.Exec(ctx, name, []string{"/usr/bin/cloud-init", "status", "--wait"}, nil, l.Out, l.Err); err != nil {
+		return fmt.Errorf("cloud-init: %w", err)
+	}
+	if err := l.Exec(ctx, name, []string{"/usr/bin/test", "-f", provision.CodingAgentsReadyPath}, nil, io.Discard, l.Err); err != nil {
+		return fmt.Errorf("coding-agent readiness marker %s is missing: %w", provision.CodingAgentsReadyPath, err)
+	}
+	return nil
 }
 
 func (l Libvirt) Stop(ctx context.Context, name string) error {
@@ -598,7 +644,13 @@ func (l Libvirt) ExecAsUser(ctx context.Context, name, user string, args []strin
 	if len(args) == 0 {
 		return fmt.Errorf("guest command is required")
 	}
-	commandArgs := append([]string{"/usr/sbin/runuser", "--user", user, "--"}, args...)
+	commandArgs := []string{
+		"/usr/sbin/runuser", "--user", user, "--", "/usr/bin/env",
+		"HOME=" + provision.AgentHome,
+		"SHELL=/bin/bash",
+		"PATH=" + provision.AgentManagedPath,
+	}
+	commandArgs = append(commandArgs, args...)
 	return l.execGuest(ctx, name, commandArgs, stdin, stdout, stderr)
 }
 

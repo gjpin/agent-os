@@ -114,3 +114,44 @@ func TestAgentInstructionsScriptIsIdempotentAndReplacesDestinations(t *testing.T
 		}
 	}
 }
+
+func TestCodingAgentsScriptContainsRequiredInstallersAndSafetyControls(t *testing.T) {
+	script := CodingAgentsScript()
+	command := exec.Command("bash", "-n")
+	command.Stdin = strings.NewReader(script)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("coding-agent installer is not valid Bash: %v\n%s", err, output)
+	}
+	for _, expected := range []string{
+		"set -euo pipefail",
+		"dnf install -y -- nodejs26 nodejs26-npm",
+		"https://opencode.ai/install",
+		"https://chatgpt.com/codex/install.sh",
+		"https://claude.ai/install.sh",
+		"@earendil-works/pi-coding-agent",
+		"https://gh.io/copilot-install",
+		"--retry 5 --retry-delay 2 --retry-all-errors",
+		"mktemp -d /tmp/agent-os-coding-agents.XXXXXX",
+		"trap cleanup EXIT",
+		"/usr/sbin/runuser --user agent -- /usr/bin/env",
+		"HOME=\"$agent_home\" SHELL=/bin/bash PATH=\"$managed_path\"",
+		"--no-modify-path",
+		"--global --ignore-scripts",
+		"command -v \"$1\"",
+		"grep -Fqx \"$path_line\"",
+		"touch \"$ready_marker\"",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Errorf("coding-agent installer omits %q", expected)
+		}
+	}
+	if strings.Index(script, "if [ -f \"$ready_marker\" ]") > strings.Index(script, "dnf install") {
+		t.Fatal("idempotency guard runs after package installation")
+	}
+	if strings.Index(script, "touch \"$ready_marker\"") < strings.Index(script, "for executable in") {
+		t.Fatal("readiness marker is written before executable validation")
+	}
+	if strings.Count(script, "readonly path_line=") != 1 {
+		t.Fatal("managed PATH line is not defined exactly once")
+	}
+}

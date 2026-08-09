@@ -6,11 +6,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gjpin/agent-os/internal/artifacts"
 	"github.com/gjpin/agent-os/internal/execx"
@@ -46,6 +48,47 @@ type guestAgentTestRunner struct {
 	Calls []execx.Invocation
 }
 
+type blockingRunner struct{}
+
+func (blockingRunner) Run(ctx context.Context, _ string, _ []string, _ io.Reader, _, _ io.Writer) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+type unavailableGuestRunner struct{}
+
+func (unavailableGuestRunner) Run(context.Context, string, []string, io.Reader, io.Writer, io.Writer) error {
+	return errors.New("guest agent is unavailable")
+}
+
+type provisioningGuestRunner struct {
+	commands int
+	failAt   int
+}
+
+func (r *provisioningGuestRunner) Run(_ context.Context, _ string, args []string, _ io.Reader, stdout, _ io.Writer) error {
+	var request struct {
+		Execute string `json:"execute"`
+	}
+	if err := json.Unmarshal([]byte(args[len(args)-1]), &request); err != nil {
+		return err
+	}
+	switch request.Execute {
+	case "guest-exec":
+		r.commands++
+		_, _ = io.WriteString(stdout, fmt.Sprintf(`{"return":{"pid":%d}}`, r.commands))
+	case "guest-exec-status":
+		exitCode := 0
+		if r.commands == r.failAt {
+			exitCode = 1
+		}
+		_, _ = io.WriteString(stdout, fmt.Sprintf(`{"return":{"exited":true,"exitcode":%d}}`, exitCode))
+	default:
+		return errors.New("unexpected request")
+	}
+	return nil
+}
+
 func (r *guestAgentTestRunner) Run(_ context.Context, name string, args []string, _ io.Reader, stdout, _ io.Writer) error {
 	r.Calls = append(r.Calls, execx.Invocation{Name: name, Args: append([]string(nil), args...)})
 	if name != "virsh" || len(args) == 0 {
@@ -75,13 +118,123 @@ func TestLimaUsesArgumentArrays(t *testing.T) {
 	if err := provider.Start(context.Background(), "agents"); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.Calls) != 1 || runner.Calls[0].Name != "limactl" {
+	if len(runner.Calls) != 2 || runner.Calls[0].Name != "limactl" {
 		t.Fatalf("unexpected calls: %+v", runner.Calls)
 	}
-	for _, arg := range runner.Calls[0].Args {
-		if arg == "sh" || arg == "-c" || arg == "eval" {
-			t.Fatalf("shell execution leaked into provider args: %+v", runner.Calls[0].Args)
+	for _, call := range runner.Calls {
+		for _, arg := range call.Args {
+			if arg == "sh" || arg == "-c" || arg == "eval" {
+				t.Fatalf("shell execution leaked into provider args: %+v", call.Args)
+			}
 		}
+	}
+	if got := runner.Calls[1].Args; strings.Join(got, " ") != "shell agents -- sudo /usr/bin/test -f "+provision.CodingAgentsReadyPath {
+		t.Fatalf("unexpected readiness check: %+v", got)
+	}
+}
+
+func TestLimaStartSurfacesProvisioningReadinessFailures(t *testing.T) {
+	runner := &backendScriptedRunner{Errors: []error{nil, errors.New("marker absent")}}
+	err := (Lima{Runner: runner}).Start(context.Background(), "agents")
+	if err == nil || !strings.Contains(err.Error(), "readiness marker") {
+		t.Fatalf("expected missing-marker failure, got %v", err)
+	}
+
+	runner = &backendScriptedRunner{Errors: []error{errors.New("provision script failed")}}
+	err = (Lima{Runner: runner}).Start(context.Background(), "agents")
+	if err == nil || !strings.Contains(err.Error(), "required Lima provisioning failed") {
+		t.Fatalf("expected Lima provisioning failure, got %v", err)
+	}
+}
+
+func TestLimaStartHonorsTimeoutAndCancellation(t *testing.T) {
+	originalTimeout := provisioningTimeout
+	provisioningTimeout = 5 * time.Millisecond
+	t.Cleanup(func() { provisioningTimeout = originalTimeout })
+
+	err := (Lima{Runner: blockingRunner{}}).Start(context.Background(), "agents")
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("expected provisioning timeout, got %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = (Lima{Runner: blockingRunner{}}).Start(ctx, "agents")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
+	}
+}
+
+func TestLibvirtProvisioningRequiresCloudInitAndMarker(t *testing.T) {
+	runner := &provisioningGuestRunner{}
+	if err := (Libvirt{Runner: runner}).waitForProvisioning(context.Background(), "agents"); err != nil {
+		t.Fatal(err)
+	}
+	if runner.commands != 3 {
+		t.Fatalf("expected guest-agent, cloud-init, and marker commands, got %d", runner.commands)
+	}
+
+	runner = &provisioningGuestRunner{failAt: 2}
+	err := (Libvirt{Runner: runner}).waitForProvisioning(context.Background(), "agents")
+	if err == nil || !strings.Contains(err.Error(), "cloud-init") {
+		t.Fatalf("expected cloud-init failure, got %v", err)
+	}
+
+	runner = &provisioningGuestRunner{failAt: 3}
+	err = (Libvirt{Runner: runner}).waitForProvisioning(context.Background(), "agents")
+	if err == nil || !strings.Contains(err.Error(), "readiness marker") {
+		t.Fatalf("expected marker failure, got %v", err)
+	}
+}
+
+func TestLibvirtProvisioningWaitHonorsTimeoutAndCancellation(t *testing.T) {
+	originalInterval := provisioningPollInterval
+	provisioningPollInterval = time.Millisecond
+	t.Cleanup(func() { provisioningPollInterval = originalInterval })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	err := (Libvirt{Runner: unavailableGuestRunner{}}).waitForProvisioning(ctx, "agents")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected timeout, got %v", err)
+	}
+
+	ctx, cancel = context.WithCancel(context.Background())
+	cancel()
+	err = (Libvirt{Runner: unavailableGuestRunner{}}).waitForProvisioning(ctx, "agents")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
+	}
+}
+
+func TestAgentUserExecutionSetsManagedEnvironment(t *testing.T) {
+	limaRunner := &execx.RecordingRunner{}
+	if err := (Lima{Runner: limaRunner}).ExecAsUser(context.Background(), "agents", "agent", []string{"codex", "login"}, nil, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	limaArgs := strings.Join(limaRunner.Calls[0].Args, " ")
+	for _, expected := range []string{"HOME=" + provision.AgentHome, "SHELL=/bin/bash", "PATH=" + provision.AgentManagedPath, "codex login"} {
+		if !strings.Contains(limaArgs, expected) {
+			t.Errorf("Lima agent execution omits %q: %s", expected, limaArgs)
+		}
+	}
+
+	libvirtRunner := &guestAgentTestRunner{}
+	if err := (Libvirt{Runner: libvirtRunner}).ExecAsUser(context.Background(), "agents", "agent", []string{"codex", "login"}, nil, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	var request struct {
+		Arguments struct {
+			Path string   `json:"path"`
+			Args []string `json:"arg"`
+		} `json:"arguments"`
+	}
+	if err := json.Unmarshal([]byte(libvirtRunner.Calls[0].Args[len(libvirtRunner.Calls[0].Args)-1]), &request); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(request.Arguments.Args, " ")
+	if request.Arguments.Path != "/usr/sbin/runuser" || !strings.Contains(joined, "HOME="+provision.AgentHome) || !strings.Contains(joined, "PATH="+provision.AgentManagedPath) || !strings.HasSuffix(joined, "codex login") {
+		t.Fatalf("unexpected libvirt agent execution: path=%q args=%q", request.Arguments.Path, joined)
 	}
 }
 

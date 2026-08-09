@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gjpin/agent-os/internal/artifacts"
 	"github.com/gjpin/agent-os/internal/backend"
@@ -411,7 +412,8 @@ func (a *App) lifecycleCommand(action string) *cobra.Command {
 				return err
 			}
 			return store.WithLock(cmd.Context(), c.VMName, func() error {
-				if _, err := store.Load(c.VMName); err != nil {
+				value, err := store.Load(c.VMName)
+				if err != nil {
 					return fmt.Errorf("load VM state: %w (create the VM first)", err)
 				}
 				if err := p.Available(cmd.Context()); err != nil {
@@ -432,9 +434,22 @@ func (a *App) lifecycleCommand(action string) *cobra.Command {
 				}
 				if opErr != nil {
 					if action == "start" {
-						if forwarding, ok := p.(backend.Forwarding); ok {
-							_ = forwarding.RemoveForwarding(cmd.Context(), a.backendSpec(c, false))
+						cleanupErrors := []error{opErr}
+						cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+						if stopErr := p.Stop(cleanupCtx, c.VMName); stopErr != nil {
+							cleanupErrors = append(cleanupErrors, fmt.Errorf("stop VM after failed start: %w", stopErr))
 						}
+						if forwarding, ok := p.(backend.Forwarding); ok {
+							if forwardingErr := forwarding.RemoveForwarding(cleanupCtx, a.backendSpec(c, false)); forwardingErr != nil {
+								cleanupErrors = append(cleanupErrors, fmt.Errorf("remove forwarding after failed start: %w", forwardingErr))
+							}
+						}
+						cancel()
+						value.Lifecycle = model.StatusStopped
+						if stateErr := store.Save(value); stateErr != nil {
+							cleanupErrors = append(cleanupErrors, fmt.Errorf("save stopped state after failed start: %w", stateErr))
+						}
+						return errors.Join(cleanupErrors...)
 					}
 					return opErr
 				}
@@ -444,10 +459,6 @@ func (a *App) lifecycleCommand(action string) *cobra.Command {
 							return err
 						}
 					}
-				}
-				value, err := store.Load(c.VMName)
-				if err != nil {
-					return err
 				}
 				if action == "start" {
 					value.Lifecycle = model.StatusRunning
