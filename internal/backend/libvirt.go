@@ -37,7 +37,7 @@ const (
 var guestAgentPollInterval = 100 * time.Millisecond
 
 var (
-	provisioningTimeout      = 15 * time.Minute
+	provisioningTimeout      = 30 * time.Minute
 	provisioningPollInterval = time.Second
 )
 

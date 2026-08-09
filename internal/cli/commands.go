@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gjpin/agent-os/internal/artifacts"
 	"github.com/gjpin/agent-os/internal/backend"
 	"github.com/gjpin/agent-os/internal/config"
 	"github.com/gjpin/agent-os/internal/credentials"
@@ -589,19 +588,17 @@ func (a *App) packagesCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			packages := append([]string(nil), args...)
-			if len(packages) == 0 {
-				packages = artifacts.PackageManifest(c.Packages)
+			additions := append([]string(nil), args...)
+			if len(additions) == 0 {
+				additions = c.Packages
 			}
-			if len(packages) == 0 {
-				return errors.New("provide at least one package")
-			}
-			for _, pkg := range packages {
+			for _, pkg := range additions {
 				if strings.TrimSpace(pkg) == "" || strings.ContainsAny(pkg, "\r\n;|&") {
 					return fmt.Errorf("invalid package name %q", pkg)
 				}
 			}
-			if err := provision.ValidatePackages(packages); err != nil {
+			packages, err := provision.PackageManifest(additions)
+			if err != nil {
 				return err
 			}
 			commandArgs := append([]string{"sudo", "dnf", "install", "-y", "--"}, packages...)

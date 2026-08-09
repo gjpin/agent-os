@@ -5,10 +5,72 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
 )
+
+func TestBaselinePackagesAreExactSortedAndDuplicateFree(t *testing.T) {
+	want := strings.Fields(`
+bash bat bats bind-utils bzip2 ca-certificates cargo chromium
+clang clang-tools-extra cmake coreutils curl diffutils fd-find file
+findutils fzf gawk gcc gcc-c++ gdb gettext-envsubst gh git git-lfs
+golang gopls grep gzip iproute iputils jq just less lld lldb llvm lsof
+make meson mold ninja-build nmap-ncat
+nodejs24 nodejs24-bin nodejs24-npm nodejs24-npm-bin
+openssh-clients openssl patch pkgconf-pkg-config procps-ng
+python3 python3-devel python3-pytest-xdist ripgrep rsync rust
+rust-analyzer rustfmt scons sed ShellCheck shfmt sqlite strace tar time
+tree tree-sitter-cli unzip util-linux uv wget which xxd xz yq zip zstd
+pnpm vim-enhanced
+podman podman-docker buildah skopeo
+dnf-plugins-core rpm-build rpmdevtools redhat-rpm-config
+autoconf automake libtool m4 ccache
+valgrind perf psmisc sysstat
+socat tcpdump traceroute
+acl attr entr inotify-tools
+python3-pip pipx
+direnv tmux
+moreutils parallel gnupg2 man-db man-pages
+kubernetes1.36-client helm kustomize opentofu
+`)
+	sort.Strings(want)
+	got := BaselinePackages()
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("baseline package set differs:\n got: %v\nwant: %v", got, want)
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i-1] >= got[i] {
+			t.Fatalf("baseline is not sorted and duplicate-free at %q, %q", got[i-1], got[i])
+		}
+	}
+}
+
+func TestPackageManifestMergesAdditionsDeterministically(t *testing.T) {
+	got, err := PackageManifest([]string{"htop", "git", "htop"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sort.StringsAreSorted(got) {
+		t.Fatalf("manifest is not sorted: %v", got)
+	}
+	counts := make(map[string]int, len(got))
+	for _, pkg := range got {
+		counts[pkg]++
+	}
+	for _, pkg := range BaselinePackages() {
+		if counts[pkg] != 1 {
+			t.Errorf("baseline package %q occurs %d times", pkg, counts[pkg])
+		}
+	}
+	if counts["htop"] != 1 {
+		t.Fatalf("custom addition occurs %d times", counts["htop"])
+	}
+	if _, err := PackageManifest([]string{"valid", "--invalid"}); err == nil {
+		t.Fatal("manifest accepted an invalid operator addition")
+	}
+}
 
 func TestAgentInstructionsScriptContainsAllManagedDestinations(t *testing.T) {
 	content := "instructions '$HOME'\nwith a trailing newline\n"
@@ -127,7 +189,7 @@ func TestCodingAgentsScriptContainsRequiredInstallersAndSafetyControls(t *testin
 		"dnf install -y -- adoptium-temurin-java-repository",
 		"dnf config-manager setopt adoptium.enabled=1",
 		"dnf install -y -- temurin-25-jdk",
-		"dnf install -y -- nodejs26 nodejs26-npm",
+		"for executable in node npm",
 		"https://opencode.ai/install",
 		"https://chatgpt.com/codex/install.sh",
 		"https://claude.ai/install.sh",
@@ -154,9 +216,13 @@ func TestCodingAgentsScriptContainsRequiredInstallersAndSafetyControls(t *testin
 	repositoryInstall := strings.Index(script, "dnf install -y -- adoptium-temurin-java-repository")
 	repositoryEnable := strings.Index(script, "dnf config-manager setopt adoptium.enabled=1")
 	jdkInstall := strings.Index(script, "dnf install -y -- temurin-25-jdk")
-	nodeInstall := strings.Index(script, "dnf install -y -- nodejs26 nodejs26-npm")
-	if !(repositoryInstall < repositoryEnable && repositoryEnable < jdkInstall && jdkInstall < nodeInstall) {
-		t.Fatalf("Temurin provisioning commands are out of order: repository install=%d enable=%d JDK install=%d Node install=%d", repositoryInstall, repositoryEnable, jdkInstall, nodeInstall)
+	nodeValidation := strings.Index(script, "for executable in node npm")
+	npmInstall := strings.Index(script, "/usr/bin/npm install")
+	if !(repositoryInstall < repositoryEnable && repositoryEnable < jdkInstall && jdkInstall < nodeValidation && nodeValidation < npmInstall) {
+		t.Fatalf("provisioning commands are out of order: repository install=%d enable=%d JDK install=%d Node validation=%d npm install=%d", repositoryInstall, repositoryEnable, jdkInstall, nodeValidation, npmInstall)
+	}
+	if strings.Contains(script, "nodejs26") || strings.Contains(script, "dnf install -y -- nodejs") {
+		t.Fatal("coding-agent bootstrap installs Node instead of using the baseline")
 	}
 	javaValidation := strings.Index(script, "for executable in java javac")
 	if javaValidation < jdkInstall {

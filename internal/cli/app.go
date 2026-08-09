@@ -162,7 +162,7 @@ func (a *App) newRoot() *cobra.Command {
 	root.PersistentFlags().StringSlice("allowed-cidr", nil, "additional allowed guest egress CIDR (repeatable)")
 	root.PersistentFlags().String("release-repository", "", "GitHub release repository (owner/name)")
 	root.PersistentFlags().String("state-dir", "", "operational state directory")
-	root.PersistentFlags().StringSlice("packages", nil, "requested guest package manifest")
+	root.PersistentFlags().StringSlice("packages", nil, "additional guest packages")
 
 	root.AddCommand(a.setupHostCommand())
 	root.AddCommand(a.createCommand())

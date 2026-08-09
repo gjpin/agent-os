@@ -63,9 +63,7 @@ func DefaultConfig(stateDir string) Config {
 		ReleaseRepository: "gjpin/agent-os",
 		StateDir:          stateDir,
 		LogFormat:         LogHuman,
-		Packages: []string{
-			"git", "curl", "jq", "ripgrep", "fd-find", "tmux", "vim-enhanced",
-		},
+		Packages:          nil,
 	}
 }
 

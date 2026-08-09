@@ -170,6 +170,10 @@ func LimaYAML(def VMDefinition) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("provision repository private key: %w", err)
 	}
+	packages, err := provision.PackageManifest(def.Packages)
+	if err != nil {
+		return "", fmt.Errorf("invalid package manifest: %w", err)
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "arch: %s\nvmType: vz\nplain: true\nrosetta:\n  enabled: false\n  binfmt: false\ncontainerd:\n  system: false\n  user: false\n", architecture(def.Architecture))
 	fmt.Fprintf(&b, "cpus: %d\nmemory: %s\ndisk: %dGiB\n", def.CPUs, memorySize(def.MemoryMiB), def.DiskGiB)
@@ -194,6 +198,7 @@ func LimaYAML(def VMDefinition) (string, error) {
 	fmt.Fprintf(&b, "      cat > /run/agent-os-provision-agent-instructions <<'%s'\n", agentInstructionsDelimiter)
 	appendIndented(&b, agentInstructionsScript, "      ")
 	fmt.Fprintf(&b, "      %s\n      /bin/bash /run/agent-os-provision-agent-instructions\n", agentInstructionsDelimiter)
+	fmt.Fprintf(&b, "      %s\n", strings.Join(provision.InstallCommand(packages), " "))
 	b.WriteString("      cat > /run/agent-os-install-coding-agents <<'AGENT_OS_CODING_AGENTS'\n")
 	appendIndented(&b, codingAgentsScript, "      ")
 	b.WriteString("      AGENT_OS_CODING_AGENTS\n      /bin/bash /run/agent-os-install-coding-agents\n")
@@ -250,7 +255,8 @@ func cloudInit(def VMDefinition, repositoryKeyPath string) (string, error) {
 	b.WriteString("#cloud-config\n")
 	b.WriteString("users:\n  - name: agent\n    gecos: Agent\n    groups: []\n    shell: /bin/bash\n    lock_passwd: true\n    sudo: []\n")
 	b.WriteString("ssh_pwauth: false\npackages:\n")
-	if err := provision.ValidatePackages(def.Packages); err != nil {
+	packages, err := provision.PackageManifest(def.Packages)
+	if err != nil {
 		return "#cloud-config\n# invalid package manifest: " + err.Error() + "\n", nil
 	}
 	firewallArgs := optionalPort(def.OrcaPort)
@@ -258,7 +264,6 @@ func cloudInit(def VMDefinition, repositoryKeyPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("generate guest firewall: %w", err)
 	}
-	packages := append([]string(nil), def.Packages...)
 	if !containsString(packages, "qemu-guest-agent") {
 		packages = append(packages, "qemu-guest-agent")
 	}
@@ -631,7 +636,9 @@ WantedBy=multi-user.target
 }
 
 func PackageManifest(packages []string) []string {
-	result := append([]string(nil), packages...)
-	sort.Strings(result)
+	result, err := provision.PackageManifest(packages)
+	if err != nil {
+		return nil
+	}
 	return result
 }

@@ -22,7 +22,8 @@ The project is intentionally conservative about trust boundaries:
   instruction paths linked to that canonical file;
 - OpenCode, Codex CLI, Claude Code, Pi, and GitHub Copilot CLI are preinstalled
   for the unprivileged `agent` user;
-- Eclipse Temurin 25 JDK is preinstalled as a VM development tool;
+- a complete development and operations toolset, including Node.js 24 and
+  Eclipse Temurin 25 JDK, is installed during first boot;
 - `create --dry-run` generates provider artifacts without touching libvirt or
   Lima; normal create/start/stop/destroy operations are explicit.
 
@@ -42,13 +43,34 @@ go run . completion zsh > ~/.zfunc/_agent-os
 implicitly. On Arch Linux, setup installs the required QEMU/libvirt tooling and
 enables `libvirtd.service`. `destroy` and `upgrade` also require `--yes` or an
 interactive confirmation. `auth codex` performs login inside the VM and never
-copies a host authentication database. The first `start` can take several
-minutes while the five coding agents resolve their latest versions from their
-official upstream installers. Existing VMs must be recreated to receive the
-preinstalled coding agents and Temurin 25 JDK; `upgrade` does not retrofit or
-refresh these tools. If
+copies a host authentication database. The first `start` can take up to 30
+minutes while DNF installs the baseline and the five coding agents resolve
+their latest versions from their official upstream installers. Existing VMs
+must be destroyed and recreated to receive the complete baseline; `upgrade`
+does not retrofit or refresh first-boot tools. If
 `internal/instructions/AGENTS.md` changes, rebuild the `agent-os` binary before
 creating new VMs.
+
+## Guest toolset and extra packages
+
+Every new Fedora 44 VM receives the same baseline on libvirt/x86_64 and
+Lima/aarch64. It includes standard shell and file utilities; Git and GitHub
+tools; Python, Go, Rust, Node.js 24, pnpm, Java 25, and native build toolchains;
+LLVM and GNU compilers/debuggers; Podman/Buildah/Skopeo; RPM development tools;
+networking and diagnostics; manuals and terminal tools; and Kubernetes 1.36,
+Helm, Kustomize, and OpenTofu clients. The canonical package inventory is in
+`internal/provision/provision.go`.
+
+The `packages` config key, `--packages`, and `AGENT_OS_PACKAGES` specify
+additional packages. They are merged with the guaranteed baseline, sorted, and
+deduplicated; none of these interfaces can remove a baseline package. Running
+`agent-os packages install` without package arguments installs the merged
+baseline plus configured extras in an existing VM. Explicit arguments are also
+merged with the baseline.
+
+The locked `agent` account remains unprivileged: it has no sudo policy, and
+installing diagnostic, networking, container, or build packages does not grant
+it extra Linux capabilities or relax the VM security model.
 
 The release pipeline publishes only `linux/amd64` and `darwin/arm64` binaries,
 with SHA-256 checksums. `install.sh` downloads into a mode-0700 temporary

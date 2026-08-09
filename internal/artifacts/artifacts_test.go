@@ -364,11 +364,43 @@ func TestAgentInstructionsAreIncludedInProviderArtifacts(t *testing.T) {
 }
 
 func TestCodingAgentsInstallerIsOrderedBeforeOrcaForEveryProvider(t *testing.T) {
-	def := VMDefinition{Name: "agents", CPUs: 2, MemoryMiB: 4096, DiskGiB: 120, Architecture: "x86_64"}
+	def := VMDefinition{Name: "agents", CPUs: 2, MemoryMiB: 4096, DiskGiB: 120, Architecture: "x86_64", Packages: []string{"htop", "git"}}
 	cloudInit := CloudInit(def, "")
 	lima, err := LimaYAML(def)
 	if err != nil {
 		t.Fatal(err)
+	}
+	var cloudDoc cloudInitDocument
+	if err := yaml.Unmarshal([]byte(cloudInit), &cloudDoc); err != nil {
+		t.Fatalf("cloud-init is not valid YAML: %v", err)
+	}
+	cloudPackages := make(map[string]bool, len(cloudDoc.Packages))
+	for _, pkg := range cloudDoc.Packages {
+		cloudPackages[pkg] = true
+	}
+	for _, pkg := range append(provision.BaselinePackages(), "htop") {
+		if !cloudPackages[pkg] {
+			t.Errorf("cloud-init package manifest omits %q", pkg)
+		}
+	}
+	if !cloudPackages["qemu-guest-agent"] {
+		t.Error("cloud-init omits the libvirt qemu guest agent")
+	}
+	var limaDoc limaDocument
+	if err := yaml.Unmarshal([]byte(lima), &limaDoc); err != nil {
+		t.Fatalf("Lima profile is not valid YAML: %v", err)
+	}
+	if len(limaDoc.Provision) != 1 {
+		t.Fatalf("unexpected Lima provisioning entries: %+v", limaDoc.Provision)
+	}
+	limaScript := limaDoc.Provision[0].Script
+	for _, pkg := range append(provision.BaselinePackages(), "htop") {
+		if !strings.Contains(limaScript, " "+pkg+" ") && !strings.Contains(limaScript, " "+pkg+"\n") {
+			t.Errorf("Lima package install omits %q", pkg)
+		}
+	}
+	if strings.Contains(limaScript, " qemu-guest-agent ") || strings.Contains(limaScript, " qemu-guest-agent\n") {
+		t.Error("Lima includes the libvirt-only qemu guest agent")
 	}
 	for name, artifact := range map[string]string{"cloud-init": cloudInit, "Lima": lima} {
 		for _, command := range []string{
@@ -381,8 +413,12 @@ func TestCodingAgentsInstallerIsOrderedBeforeOrcaForEveryProvider(t *testing.T) 
 			}
 		}
 		instructions := strings.Index(artifact, "agent-os-provision-agent-instructions")
+		packageInstall := strings.Index(artifact, "dnf install -y -- ")
 		agents := strings.Index(artifact, "agent-os-install-coding-agents")
 		orca := strings.Index(artifact, "agent-os-install-orca")
+		if name == "Lima" && (packageInstall < 0 || !(instructions < packageInstall && packageInstall < agents)) {
+			t.Fatalf("Lima package provisioning order is instructions=%d packages=%d agents=%d", instructions, packageInstall, agents)
+		}
 		if instructions < 0 || agents < 0 || orca < 0 || !(instructions < agents && agents < orca) {
 			t.Fatalf("%s provisioning order is instructions=%d agents=%d orca=%d", name, instructions, agents, orca)
 		}

@@ -20,6 +20,64 @@ const (
 	AgentManagedPath               = "/home/agent/.local/bin:/home/agent/.opencode/bin:/usr/local/bin:/usr/bin:/bin"
 )
 
+// baselinePackages is the development and operations toolset guaranteed in
+// every newly provisioned VM. Provider-specific packages are added by the
+// provider artifact generator, while configured packages are additive extras.
+var baselinePackages = strings.Fields(`
+bash bat bats bind-utils bzip2 ca-certificates cargo chromium
+clang clang-tools-extra cmake coreutils curl diffutils fd-find file
+findutils fzf gawk gcc gcc-c++ gdb gettext-envsubst gh git git-lfs
+golang gopls grep gzip iproute iputils jq just less lld lldb llvm lsof
+make meson mold ninja-build nmap-ncat
+nodejs24 nodejs24-bin nodejs24-npm nodejs24-npm-bin
+openssh-clients openssl patch pkgconf-pkg-config procps-ng
+python3 python3-devel python3-pytest-xdist ripgrep rsync rust
+rust-analyzer rustfmt scons sed ShellCheck shfmt sqlite strace tar time
+tree tree-sitter-cli unzip util-linux uv wget which xxd xz yq zip zstd
+pnpm vim-enhanced
+podman podman-docker buildah skopeo
+dnf-plugins-core rpm-build rpmdevtools redhat-rpm-config
+autoconf automake libtool m4 ccache
+valgrind perf psmisc sysstat
+socat tcpdump traceroute
+acl attr entr inotify-tools
+python3-pip pipx
+direnv tmux
+moreutils parallel gnupg2 man-db man-pages
+kubernetes1.36-client helm kustomize opentofu
+`)
+
+// BaselinePackages returns a sorted copy of the packages guaranteed in every
+// VM. Callers cannot mutate the canonical manifest.
+func BaselinePackages() []string {
+	return mergePackageSets(baselinePackages)
+}
+
+// PackageManifest validates operator additions and merges them into the
+// guaranteed baseline. Duplicate additions, including baseline packages, are
+// harmless and the resulting manifest is always sorted and duplicate-free.
+func PackageManifest(additions []string) ([]string, error) {
+	if err := ValidatePackages(additions); err != nil {
+		return nil, err
+	}
+	return mergePackageSets(baselinePackages, additions), nil
+}
+
+func mergePackageSets(sets ...[]string) []string {
+	seen := make(map[string]struct{})
+	for _, set := range sets {
+		for _, pkg := range set {
+			seen[pkg] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(seen))
+	for pkg := range seen {
+		result = append(result, pkg)
+	}
+	sort.Strings(result)
+	return result
+}
+
 // CodingAgentsScript returns the root-run, idempotent installer for the five
 // coding agents included in every VM. Upstream installers intentionally select
 // their latest release at first boot; the marker prevents a later provisioning
@@ -39,7 +97,11 @@ fi
 dnf install -y -- adoptium-temurin-java-repository
 dnf config-manager setopt adoptium.enabled=1
 dnf install -y -- temurin-25-jdk
-dnf install -y -- nodejs26 nodejs26-npm
+
+for executable in node npm; do
+  resolved=$(command -v "$executable")
+  test -x "$resolved"
+done
 install -d -o agent -g agent -m 0755 "$agent_home/.local/bin" "$agent_home/.opencode/bin"
 
 installer_dir=$(mktemp -d /tmp/agent-os-coding-agents.XXXXXX)
@@ -153,15 +215,10 @@ var executableMap = map[string]string{
 }
 
 func ValidatePackages(packages []string) error {
-	seen := make(map[string]struct{}, len(packages))
 	for _, pkg := range packages {
 		if !packageName.MatchString(pkg) || strings.Contains(pkg, "--") {
 			return fmt.Errorf("invalid package name %q", pkg)
 		}
-		if _, ok := seen[pkg]; ok {
-			return fmt.Errorf("duplicate package %q", pkg)
-		}
-		seen[pkg] = struct{}{}
 	}
 	return nil
 }
