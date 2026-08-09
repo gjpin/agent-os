@@ -371,6 +371,15 @@ func TestCodingAgentsInstallerIsOrderedBeforeOrcaForEveryProvider(t *testing.T) 
 		t.Fatal(err)
 	}
 	for name, artifact := range map[string]string{"cloud-init": cloudInit, "Lima": lima} {
+		for _, command := range []string{
+			"dnf install -y -- adoptium-temurin-java-repository",
+			"dnf config-manager setopt adoptium.enabled=1",
+			"dnf install -y -- temurin-25-jdk",
+		} {
+			if !strings.Contains(artifact, command) {
+				t.Errorf("%s artifact omits Temurin provisioning command %q", name, command)
+			}
+		}
 		instructions := strings.Index(artifact, "agent-os-provision-agent-instructions")
 		agents := strings.Index(artifact, "agent-os-install-coding-agents")
 		orca := strings.Index(artifact, "agent-os-install-orca")

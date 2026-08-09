@@ -36,6 +36,9 @@ if [ -f "$ready_marker" ]; then
   exit 0
 fi
 
+dnf install -y -- adoptium-temurin-java-repository
+dnf config-manager setopt adoptium.enabled=1
+dnf install -y -- temurin-25-jdk
 dnf install -y -- nodejs26 nodejs26-npm
 install -d -o agent -g agent -m 0755 "$agent_home/.local/bin" "$agent_home/.opencode/bin"
 
@@ -76,6 +79,11 @@ run_as_agent /usr/bin/npm install --global --ignore-scripts \
 download_installer https://gh.io/copilot-install "$installer_dir/copilot.sh"
 run_as_agent /usr/bin/env PREFIX="$agent_home/.local" \
   /bin/bash "$installer_dir/copilot.sh"
+
+for executable in java javac; do
+  resolved=$(command -v "$executable")
+  test -x "$resolved"
+done
 
 for executable in opencode codex claude pi copilot; do
   run_as_agent /bin/sh -c 'resolved=$(command -v "$1") && test -x "$resolved"' sh "$executable"

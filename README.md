@@ -22,6 +22,7 @@ The project is intentionally conservative about trust boundaries:
   instruction paths linked to that canonical file;
 - OpenCode, Codex CLI, Claude Code, Pi, and GitHub Copilot CLI are preinstalled
   for the unprivileged `agent` user;
+- Eclipse Temurin 25 JDK is preinstalled as a VM development tool;
 - `create --dry-run` generates provider artifacts without touching libvirt or
   Lima; normal create/start/stop/destroy operations are explicit.
 
@@ -43,8 +44,9 @@ enables `libvirtd.service`. `destroy` and `upgrade` also require `--yes` or an
 interactive confirmation. `auth codex` performs login inside the VM and never
 copies a host authentication database. The first `start` can take several
 minutes while the five coding agents resolve their latest versions from their
-official upstream installers. Existing VMs must be recreated to receive them;
-`upgrade` does not retrofit or refresh the agents. If
+official upstream installers. Existing VMs must be recreated to receive the
+preinstalled coding agents and Temurin 25 JDK; `upgrade` does not retrofit or
+refresh these tools. If
 `internal/instructions/AGENTS.md` changes, rebuild the `agent-os` binary before
 creating new VMs.
 

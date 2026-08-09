@@ -649,6 +649,9 @@ func TestDryRunProvidersIncludeAgentInstructions(t *testing.T) {
 				provision.AgentInstructionsCopilotPath,
 				"rm -rf --",
 				"ln -s --",
+				"dnf install -y -- adoptium-temurin-java-repository",
+				"dnf config-manager setopt adoptium.enabled=1",
+				"dnf install -y -- temurin-25-jdk",
 			} {
 				if !strings.Contains(artifact, expected) {
 					t.Errorf("artifact omits %q", expected)

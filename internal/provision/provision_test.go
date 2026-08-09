@@ -124,6 +124,9 @@ func TestCodingAgentsScriptContainsRequiredInstallersAndSafetyControls(t *testin
 	}
 	for _, expected := range []string{
 		"set -euo pipefail",
+		"dnf install -y -- adoptium-temurin-java-repository",
+		"dnf config-manager setopt adoptium.enabled=1",
+		"dnf install -y -- temurin-25-jdk",
 		"dnf install -y -- nodejs26 nodejs26-npm",
 		"https://opencode.ai/install",
 		"https://chatgpt.com/codex/install.sh",
@@ -147,6 +150,20 @@ func TestCodingAgentsScriptContainsRequiredInstallersAndSafetyControls(t *testin
 	}
 	if strings.Index(script, "if [ -f \"$ready_marker\" ]") > strings.Index(script, "dnf install") {
 		t.Fatal("idempotency guard runs after package installation")
+	}
+	repositoryInstall := strings.Index(script, "dnf install -y -- adoptium-temurin-java-repository")
+	repositoryEnable := strings.Index(script, "dnf config-manager setopt adoptium.enabled=1")
+	jdkInstall := strings.Index(script, "dnf install -y -- temurin-25-jdk")
+	nodeInstall := strings.Index(script, "dnf install -y -- nodejs26 nodejs26-npm")
+	if !(repositoryInstall < repositoryEnable && repositoryEnable < jdkInstall && jdkInstall < nodeInstall) {
+		t.Fatalf("Temurin provisioning commands are out of order: repository install=%d enable=%d JDK install=%d Node install=%d", repositoryInstall, repositoryEnable, jdkInstall, nodeInstall)
+	}
+	javaValidation := strings.Index(script, "for executable in java javac")
+	if javaValidation < jdkInstall {
+		t.Fatal("Java executables are validated before the JDK is installed")
+	}
+	if strings.Index(script, "touch \"$ready_marker\"") < javaValidation {
+		t.Fatal("readiness marker is written before java and javac validation")
 	}
 	if strings.Index(script, "touch \"$ready_marker\"") < strings.Index(script, "for executable in") {
 		t.Fatal("readiness marker is written before executable validation")
