@@ -15,7 +15,7 @@ func TestBaselinePackagesAreExactSortedAndDuplicateFree(t *testing.T) {
 	want := strings.Fields(`
 bash bat bats bind-utils bzip2 ca-certificates cargo chromium
 clang clang-tools-extra cmake coreutils curl diffutils fd-find file
-findutils fzf gawk gcc gcc-c++ gdb gettext-envsubst gh git git-lfs
+findutils fzf gawk gcc gcc-c++ gdb gettext-envsubst gh git git-lfs glab
 golang gopls grep gzip iproute iputils jq just less lld lldb llvm lsof
 make meson mold ninja-build nmap-ncat
 nodejs24 nodejs24-bin nodejs24-npm nodejs24-npm-bin
