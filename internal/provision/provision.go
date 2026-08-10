@@ -17,6 +17,7 @@ const (
 	AgentInstructionsPiPath        = "/home/agent/.pi/agent/AGENTS.md"
 	AgentInstructionsCopilotPath   = "/home/agent/.copilot/copilot-instructions.md"
 	CodingAgentsReadyPath          = "/var/lib/agent-os/coding-agents-ready"
+	OrcaSkillsReadyPath            = "/var/lib/agent-os/orca-skills-ready"
 	AgentHome                      = "/home/agent"
 	AgentManagedPath               = "/home/agent/.local/bin:/home/agent/.opencode/bin:/usr/local/bin:/usr/bin:/bin"
 	ProfileMountPath               = "/var/lib/agent-os/profile"
@@ -108,6 +109,40 @@ for executable in chrome-devtools chrome-devtools-mcp; do
   run_as_agent /bin/sh -c 'resolved=$(command -v "$1") && test -x "$resolved"' sh "$executable"
 done
 run_as_agent /bin/sh -c 'test -n "$(find "$HOME/.agents/skills" -name SKILL.md -print -quit)"'
+`
+}
+
+// OrcaSkillsScript returns the root-run, repeatable installer for the shared
+// Orca skills that are available to every coding agent in a new VM.
+func OrcaSkillsScript() string {
+	return `#!/bin/bash
+set -euo pipefail
+
+readonly agent_home=/home/agent
+readonly ready_marker=/var/lib/agent-os/orca-skills-ready
+readonly managed_path=/home/agent/.local/bin:/home/agent/.opencode/bin:/usr/local/bin:/usr/bin:/bin
+
+if [ -f "$ready_marker" ]; then
+  exit 0
+fi
+
+install -d -o agent -g agent -m 0755 "$agent_home/.agents/skills"
+
+run_as_agent() {
+  /usr/sbin/runuser --user agent -- /usr/bin/env \
+    HOME="$agent_home" SHELL=/bin/bash PATH="$managed_path" \
+    CODEX_HOME="$agent_home/.codex" COPILOT_HOME="$agent_home/.copilot" "$@"
+}
+
+run_as_agent /usr/bin/orca skills install \
+  --skill orca-cli \
+  --skill orchestration \
+  --agent universal
+run_as_agent /usr/bin/orca skills update --all
+
+install -d -o root -g root -m 0755 /var/lib/agent-os
+touch "$ready_marker"
+chmod 0644 "$ready_marker"
 `
 }
 

@@ -26,6 +26,8 @@ The project is intentionally conservative about trust boundaries:
   instruction paths linked to that canonical file;
 - OpenCode, Codex CLI, Claude Code, Pi, and GitHub Copilot CLI are preinstalled
   for the unprivileged `agent` user;
+- Orca's `orca-cli` and `orchestration` skills are installed in the shared
+  `/home/agent/.agents/skills` directory during first boot;
 - Chrome DevTools MCP, its `chrome-devtools` CLI, and configured GitHub skills
   are installed only inside agent VMs;
 - a complete development and operations toolset, including Node.js 24,
@@ -50,14 +52,25 @@ go run . completion zsh > ~/.zfunc/_agent-os
 `setup-host --apply --yes`; on macOS it will not run a Homebrew installer
 implicitly. On Arch Linux, setup installs the required QEMU/libvirt tooling and
 enables `libvirtd.service`. `destroy` and `upgrade` also require `--yes` or an
-interactive confirmation. `auth codex` performs login inside the VM and never
-copies a host authentication database. The first `start` can take up to 30
-minutes while DNF installs the baseline and the five coding agents resolve
-their latest versions from their official upstream installers. Existing VMs
-must be destroyed and recreated to receive the complete baseline; `upgrade`
-does not retrofit or refresh first-boot tools. If
+interactive confirmation. The first `start` can take up to 30 minutes while
+DNF installs the baseline, the five coding agents, and the shared Orca skills.
+Existing VMs must be destroyed and recreated to receive the complete baseline;
+`upgrade` does not retrofit or refresh first-boot tools. If
 `internal/instructions/AGENTS.md` changes, rebuild the `agent-os` binary before
 creating new VMs.
+
+Authentication is deliberately a post-boot action and always runs inside the
+VM. Use `agent-os auth <agent>` after starting the VM:
+
+```sh
+agent-os auth codex     # orca account add --agent codex
+agent-os auth claude    # orca account add --agent claude
+agent-os auth opencode  # opencode auth login
+agent-os auth copilot   # copilot login
+agent-os auth pi        # launch Pi, then enter /login
+```
+
+No host authentication database is copied into the VM.
 
 The top-level `skills` configuration list accepts public GitHub tree URLs. The
 built-in Chrome DevTools CLI skill is always included; configured entries are

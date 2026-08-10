@@ -656,15 +656,36 @@ func (a *App) authCommand() *cobra.Command {
 		Short: "Perform an interactive credential login inside the VM",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if args[0] != "codex" {
-				return fmt.Errorf("unsupported agent %q; supported agent: codex", args[0])
+			commandArgs, ok := authAgentCommand(args[0])
+			if !ok {
+				return fmt.Errorf("unsupported agent %q; supported agents: opencode, codex, claude, pi, copilot", args[0])
 			}
 			p, c, _, err := a.providerAndConfig("")
 			if err != nil {
 				return err
 			}
-			return execAsAgent(cmd.Context(), p, c.VMName, []string{"codex", "login"}, a.In, a.Out, a.Err)
+			if args[0] == "pi" {
+				fmt.Fprintln(a.Out, "Pi is starting; enter /login in the interactive session to authenticate.")
+			}
+			return execAsAgent(cmd.Context(), p, c.VMName, commandArgs, a.In, a.Out, a.Err)
 		},
+	}
+}
+
+func authAgentCommand(agent string) ([]string, bool) {
+	switch agent {
+	case "codex":
+		return []string{"orca", "account", "add", "--agent", "codex"}, true
+	case "claude":
+		return []string{"orca", "account", "add", "--agent", "claude"}, true
+	case "opencode":
+		return []string{"opencode", "auth", "login"}, true
+	case "copilot":
+		return []string{"copilot", "login"}, true
+	case "pi":
+		return []string{"pi"}, true
+	default:
+		return nil, false
 	}
 }
 

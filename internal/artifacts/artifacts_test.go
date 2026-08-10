@@ -464,12 +464,23 @@ func TestKindAndCodingAgentsInstallersAreOrderedBeforeOrcaForEveryProvider(t *te
 		packageInstall := strings.Index(artifact, "dnf install -y -- ")
 		kindSetup := strings.Index(artifact, "agent-os-setup-kind-podman")
 		agents := strings.Index(artifact, "agent-os-install-coding-agents")
-		orca := strings.Index(artifact, "agent-os-install-orca")
+		orca := strings.Index(artifact, "agent-os-install-orca\n")
+		orcaSkills := strings.Index(artifact, "agent-os-install-orca-skills")
 		if name == "Lima" && (packageInstall < 0 || !(instructions < packageInstall && packageInstall < kindSetup)) {
 			t.Fatalf("Lima package provisioning order is instructions=%d packages=%d kind=%d", instructions, packageInstall, kindSetup)
 		}
-		if instructions < 0 || kindSetup < 0 || agents < 0 || orca < 0 || !(instructions < kindSetup && kindSetup < agents && agents < orca) {
-			t.Fatalf("%s provisioning order is instructions=%d kind=%d agents=%d orca=%d", name, instructions, kindSetup, agents, orca)
+		if instructions < 0 || kindSetup < 0 || agents < 0 || orca < 0 || orcaSkills < 0 || !(instructions < kindSetup && kindSetup < agents && agents < orca && orca < orcaSkills) {
+			t.Fatalf("%s provisioning order is instructions=%d kind=%d agents=%d orca=%d orca-skills=%d", name, instructions, kindSetup, agents, orca, orcaSkills)
+		}
+		for _, command := range []string{
+			"--skill orca-cli",
+			"--skill orchestration",
+			"--agent universal",
+			"/usr/bin/orca skills update --all",
+		} {
+			if !strings.Contains(artifact, command) {
+				t.Errorf("%s artifact omits Orca skills command %q", name, command)
+			}
 		}
 		for _, endpoint := range []string{
 			"https://opencode.ai/install",

@@ -343,6 +343,28 @@ func TestCreateConfigPromptFailsOnNonTTY(t *testing.T) {
 	}
 }
 
+func TestAuthAgentCommands(t *testing.T) {
+	tests := map[string]string{
+		"codex":    "orca account add --agent codex",
+		"claude":   "orca account add --agent claude",
+		"opencode": "opencode auth login",
+		"copilot":  "copilot login",
+		"pi":       "pi",
+	}
+	for agent, want := range tests {
+		got, ok := authAgentCommand(agent)
+		if !ok {
+			t.Fatalf("authAgentCommand(%q) reported unsupported", agent)
+		}
+		if strings.Join(got, " ") != want {
+			t.Errorf("authAgentCommand(%q) = %q, want %q", agent, strings.Join(got, " "), want)
+		}
+	}
+	if got, ok := authAgentCommand("unknown"); ok || got != nil {
+		t.Fatalf("authAgentCommand(unknown) = (%v, %t), want (nil, false)", got, ok)
+	}
+}
+
 func containsPackage(values []string, wanted string) bool { return containsString(values, wanted) }
 
 func containsString(values []string, wanted string) bool {
