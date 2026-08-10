@@ -22,6 +22,8 @@ const (
 	AgentManagedPath               = "/home/agent/.local/bin:/home/agent/.opencode/bin:/usr/local/bin:/usr/bin:/bin"
 	ProfileMountPath               = "/var/lib/agent-os/profile"
 	ProfileSyncPath                = "/usr/local/libexec/agent-os-profile-sync"
+	ProfileSetupPath               = "/usr/local/libexec/agent-os-profile-setup"
+	ProfileRestoreServicePath      = "/etc/systemd/system/agent-os-profile-restore.service"
 	DefaultChromeDevToolsSkillURL  = "https://github.com/ChromeDevTools/chrome-devtools-mcp/tree/main/skills/chrome-devtools-cli"
 )
 
@@ -586,6 +588,29 @@ restore)
   exit 2
   ;;
 esac
+`
+}
+
+// ProfileRestoreSystemdUnit re-establishes the profile mount and restores
+// Claude Code's separate configuration before Orca starts after every guest
+// boot. The setup script is idempotent and is needed on Lima because its
+// additional-disk bind mount is not itself persistent across a guest reboot.
+func ProfileRestoreSystemdUnit() string {
+	return `[Unit]
+Description=agent-os persistent profile restore
+After=local-fs.target
+Before=orca.service
+Wants=local-fs.target
+RequiresMountsFor=/var/lib/agent-os/profile
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/agent-os-profile-setup
+ExecStart=/usr/local/libexec/agent-os-profile-sync restore
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
 `
 }
 

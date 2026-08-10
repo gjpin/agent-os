@@ -43,6 +43,8 @@ go run . config validate
 go run . setup-host
 go run . create --dry-run agents
 go run . start agents
+go run . autostart enable agents
+go run . autostart status agents
 go run . skills install agents
 go run . destroy --yes --purge-profiles agents
 go run . completion zsh > ~/.zfunc/_agent-os
@@ -58,6 +60,25 @@ Existing VMs must be destroyed and recreated to receive the complete baseline;
 `upgrade` does not retrofit or refresh first-boot tools. If
 `internal/instructions/AGENTS.md` changes, rebuild the `agent-os` binary before
 creating new VMs.
+
+### Automatic startup
+
+Autostart is opt-in and registration-only: enabling it registers the VM for
+host boot but does not start it immediately.
+
+```sh
+agent-os autostart enable agents
+agent-os autostart status agents
+agent-os stop agents                    # leaves autostart enabled
+agent-os autostart disable agents
+```
+
+After enabling, reboot the host and verify the VM with `agent-os status agents`.
+On Apple Silicon macOS, Lima autostart requires Lima 2.2 or newer; see
+[Lima's autostart documentation](https://lima-vm.io/docs/usage/autostart/).
+On Linux, run `agent-os autostart enable agents` again after changing the VM
+access mode or Orca port so the host forwarding registration is regenerated.
+Destroying a VM unregisters autostart automatically.
 
 Authentication is deliberately a post-boot action and always runs inside the
 VM. Use `agent-os auth <agent>` after starting the VM:

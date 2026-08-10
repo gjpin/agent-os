@@ -410,12 +410,15 @@ func (a *App) createCommand() *cobra.Command {
 				return err
 			}
 			return store.WithLock(cmd.Context(), c.VMName, func() error {
+				var existingAutostart *state.AutostartState
 				if existing, loadErr := store.Load(c.VMName); loadErr == nil && existing.Provider != p.Name() {
 					return fmt.Errorf("VM state belongs to provider %q, refusing to create it with provider %q", existing.Provider, p.Name())
+				} else if loadErr == nil {
+					existingAutostart = existing.Autostart
 				} else if loadErr != nil && !errors.Is(loadErr, os.ErrNotExist) {
 					return fmt.Errorf("load existing VM state: %w", loadErr)
 				}
-				value := state.State{SchemaVersion: state.SchemaVersion, Name: c.VMName, Provider: p.Name(), Lifecycle: model.StatusCreating}
+				value := state.State{SchemaVersion: state.SchemaVersion, Name: c.VMName, Provider: p.Name(), Lifecycle: model.StatusCreating, Autostart: existingAutostart}
 				if err := store.Save(value); err != nil {
 					return err
 				}
@@ -458,6 +461,8 @@ func (a *App) lifecycleCommand(action string) *cobra.Command {
 					return err
 				}
 				var opErr error
+				startedByCommand := false
+				alreadyRunning := false
 				if action == "start" {
 					forwarding, hasForwarding := p.(backend.Forwarding)
 					forwardingSpec := a.backendSpec(c, false)
@@ -466,7 +471,15 @@ func (a *App) lifecycleCommand(action string) *cobra.Command {
 							return err
 						}
 					}
-					opErr = p.Start(cmd.Context(), c.VMName)
+					providerStatus, statusErr := p.Status(cmd.Context(), c.VMName)
+					if statusErr != nil {
+						return fmt.Errorf("inspect VM before start: %w", statusErr)
+					}
+					alreadyRunning = providerStatus.Lifecycle == model.StatusRunning
+					if !alreadyRunning {
+						startedByCommand = true
+						opErr = p.Start(cmd.Context(), c.VMName)
+					}
 					if opErr == nil {
 						if refresher, ok := p.(backend.InstructionRefresher); ok {
 							opErr = refresher.RefreshAgentInstructions(cmd.Context(), c.VMName, a.agentInstructions)
@@ -489,8 +502,10 @@ func (a *App) lifecycleCommand(action string) *cobra.Command {
 					if action == "start" {
 						cleanupErrors := []error{opErr}
 						cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-						if stopErr := p.Stop(cleanupCtx, c.VMName); stopErr != nil {
-							cleanupErrors = append(cleanupErrors, fmt.Errorf("stop VM after failed start: %w", stopErr))
+						if startedByCommand {
+							if stopErr := p.Stop(cleanupCtx, c.VMName); stopErr != nil {
+								cleanupErrors = append(cleanupErrors, fmt.Errorf("stop VM after failed start: %w", stopErr))
+							}
 						}
 						if forwarding, ok := p.(backend.Forwarding); ok {
 							if forwardingErr := forwarding.RemoveForwarding(cleanupCtx, a.backendSpec(c, false)); forwardingErr != nil {
@@ -498,7 +513,11 @@ func (a *App) lifecycleCommand(action string) *cobra.Command {
 							}
 						}
 						cancel()
-						value.Lifecycle = model.StatusStopped
+						if startedByCommand {
+							value.Lifecycle = model.StatusStopped
+						} else if alreadyRunning {
+							value.Lifecycle = model.StatusRunning
+						}
 						if stateErr := store.Save(value); stateErr != nil {
 							cleanupErrors = append(cleanupErrors, fmt.Errorf("save stopped state after failed start: %w", stateErr))
 						}
@@ -527,6 +546,151 @@ func (a *App) lifecycleCommand(action string) *cobra.Command {
 		},
 	}
 	return cmd
+}
+
+func (a *App) autostartCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "autostart",
+		Short: "Register a VM to start at host boot",
+	}
+	for _, action := range []string{"enable", "disable"} {
+		action := action
+		subcommand := &cobra.Command{
+			Use:   action + " [name]",
+			Short: strings.Title(action) + " VM host-boot registration",
+			Args:  func(cmd *cobra.Command, args []string) error { return a.nameArgs(cmd, args) },
+			RunE: func(cmd *cobra.Command, args []string) error {
+				p, c, store, err := a.providerAndConfig(argName(args))
+				if err != nil {
+					return err
+				}
+				enable := action == "enable"
+				return a.changeAutostart(cmd.Context(), p, c, store, enable)
+			},
+		}
+		cmd.AddCommand(subcommand)
+	}
+	cmd.AddCommand(&cobra.Command{
+		Use:   "status [name]",
+		Short: "Show VM host-boot registration",
+		Args:  func(cmd *cobra.Command, args []string) error { return a.nameArgs(cmd, args) },
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p, c, store, err := a.providerAndConfig(argName(args))
+			if err != nil {
+				return err
+			}
+			value, stateErr := store.Load(c.VMName)
+			if stateErr != nil && !errors.Is(stateErr, os.ErrNotExist) {
+				return stateErr
+			}
+			if stateErr == nil && value.Provider != p.Name() {
+				return fmt.Errorf("state provider %q does not match host provider %q", value.Provider, p.Name())
+			}
+			enabled := stateErr == nil && value.Autostart != nil && value.Autostart.Enabled
+			if c.LogFormat == model.LogJSON {
+				return a.emitJSON(map[string]any{
+					"name":        c.VMName,
+					"provider":    p.Name(),
+					"autostart":   enabled,
+					"local_state": stateErr == nil,
+				})
+			}
+			state := "disabled"
+			if enabled {
+				state = "enabled"
+			}
+			fmt.Fprintf(a.Out, "%s\t%s\t%s\n", c.VMName, p.Name(), state)
+			return nil
+		},
+	})
+	return cmd
+}
+
+func (a *App) changeAutostart(ctx context.Context, p backend.Provider, c model.Config, store state.Store, enable bool) error {
+	return store.WithLock(ctx, c.VMName, func() error {
+		value, err := store.Load(c.VMName)
+		if err != nil {
+			return fmt.Errorf("load VM state: %w (create the VM first)", err)
+		}
+		if value.Provider != p.Name() {
+			return fmt.Errorf("state provider %q does not match host provider %q", value.Provider, p.Name())
+		}
+		starter, ok := p.(backend.Autostarter)
+		if !ok {
+			return fmt.Errorf("provider %q does not support autostart", p.Name())
+		}
+		artifactsProvider, hasArtifacts := p.(backend.AutostartArtifacts)
+		spec := a.backendSpec(c, false)
+		wasEnabled := value.Autostart != nil && value.Autostart.Enabled
+
+		if enable {
+			if err := starter.EnableAutostart(ctx, c.VMName); err != nil {
+				return fmt.Errorf("enable %s autostart: %w", c.VMName, err)
+			}
+			if hasArtifacts {
+				if err := artifactsProvider.ConfigureAutostart(ctx, spec); err != nil {
+					if wasEnabled {
+						return fmt.Errorf("configure %s autostart: %w", c.VMName, err)
+					}
+					return errors.Join(
+						fmt.Errorf("configure %s autostart: %w", c.VMName, err),
+						autostartRollback(ctx, starter, artifactsProvider, hasArtifacts, spec, true),
+					)
+				}
+			}
+			value.Autostart = &state.AutostartState{Enabled: true}
+			if err := store.Save(value); err != nil {
+				if wasEnabled {
+					return fmt.Errorf("save autostart state: %w", err)
+				}
+				return errors.Join(fmt.Errorf("save autostart state: %w", err), autostartRollback(ctx, starter, artifactsProvider, hasArtifacts, spec, true))
+			}
+			a.emit(c, "autostart-enabled", fmt.Sprintf("enabled autostart for VM %s", c.VMName), map[string]any{"name": c.VMName, "provider": p.Name()})
+			return nil
+		}
+
+		if err := starter.DisableAutostart(ctx, c.VMName); err != nil {
+			return fmt.Errorf("disable %s autostart: %w", c.VMName, err)
+		}
+		if hasArtifacts {
+			if err := artifactsProvider.RemoveAutostart(ctx, spec); err != nil {
+				rollbackErr := autostartRollback(ctx, starter, artifactsProvider, hasArtifacts, spec, false)
+				return errors.Join(fmt.Errorf("remove %s autostart artifacts: %w", c.VMName, err), rollbackErr)
+			}
+		}
+		value.Autostart = nil
+		if err := store.Save(value); err != nil {
+			rollbackErr := autostartRollback(ctx, starter, artifactsProvider, hasArtifacts, spec, false)
+			return errors.Join(fmt.Errorf("save autostart state: %w", err), rollbackErr)
+		}
+		a.emit(c, "autostart-disabled", fmt.Sprintf("disabled autostart for VM %s", c.VMName), map[string]any{"name": c.VMName, "provider": p.Name()})
+		return nil
+	})
+}
+
+func autostartRollback(ctx context.Context, starter backend.Autostarter, artifactsProvider backend.AutostartArtifacts, hasArtifacts bool, spec backend.Spec, afterEnable bool) error {
+	var rollback []error
+	if afterEnable {
+		if hasArtifacts {
+			if err := artifactsProvider.RemoveAutostart(ctx, spec); err != nil {
+				rollback = append(rollback, fmt.Errorf("remove autostart artifacts during rollback: %w", err))
+			}
+		}
+		if err := starter.DisableAutostart(ctx, spec.Config.VMName); err != nil {
+			rollback = append(rollback, fmt.Errorf("unregister autostart during rollback: %w", err))
+		}
+		return errors.Join(rollback...)
+	}
+
+	if err := starter.EnableAutostart(ctx, spec.Config.VMName); err != nil {
+		rollback = append(rollback, fmt.Errorf("restore provider autostart during rollback: %w", err))
+	}
+	if hasArtifacts {
+		if err := artifactsProvider.ConfigureAutostart(ctx, spec); err != nil {
+			rollback = append(rollback, fmt.Errorf("restore autostart artifacts during rollback: %w", err))
+		}
+	}
+	return errors.Join(rollback...)
 }
 
 func (a *App) statusCommand() *cobra.Command {
@@ -767,6 +931,11 @@ func (a *App) destroyCommand() *cobra.Command {
 				return err
 			}
 			return store.WithLock(cmd.Context(), c.VMName, func() error {
+				value, stateErr := store.Load(c.VMName)
+				if stateErr != nil && !errors.Is(stateErr, os.ErrNotExist) && !force {
+					return fmt.Errorf("load VM state before destroy: %w", stateErr)
+				}
+				autostartEnabled := stateErr == nil && value.Autostart != nil && value.Autostart.Enabled
 				stopped := false
 				profiles, hasProfiles := p.(backend.ProfileLifecycle)
 				profileSynced := true
@@ -812,6 +981,22 @@ func (a *App) destroyCommand() *cobra.Command {
 					providerDestroyNeeded = false
 				} else if !force {
 					return fmt.Errorf("verify VM state before destroy: %w", statusErr)
+				}
+				if autostartEnabled {
+					starter, hasAutostart := p.(backend.Autostarter)
+					if !hasAutostart {
+						if !force {
+							return fmt.Errorf("provider %q does not support autostart cleanup", p.Name())
+						}
+					} else if err := starter.DisableAutostart(cmd.Context(), c.VMName); err != nil {
+						if !force {
+							return fmt.Errorf("disable VM autostart before destroy: %w", err)
+						}
+					} else if autostartArtifacts, ok := p.(backend.AutostartArtifacts); ok {
+						if err := autostartArtifacts.RemoveAutostart(cmd.Context(), a.backendSpec(c, false)); err != nil && !force {
+							return fmt.Errorf("remove VM autostart artifacts before destroy: %w", err)
+						}
+					}
 				}
 				if forwarding, ok := p.(backend.Forwarding); ok {
 					if err := forwarding.RemoveForwarding(cmd.Context(), a.backendSpec(c, false)); err != nil && !force {

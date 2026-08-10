@@ -133,6 +133,91 @@ func TestLimaUsesArgumentArrays(t *testing.T) {
 	}
 }
 
+func TestLibvirtAutostartUsesPersistentDomainRegistration(t *testing.T) {
+	runner := &execx.RecordingRunner{}
+	provider := Libvirt{Runner: runner}
+	if err := provider.EnableAutostart(context.Background(), "agents"); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.DisableAutostart(context.Background(), "agents"); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.Calls) != 2 {
+		t.Fatalf("unexpected calls: %+v", runner.Calls)
+	}
+	if got := strings.Join(runner.Calls[0].Args, " "); got != "--connect qemu:///system autostart agents" {
+		t.Fatalf("unexpected enable command: %s", got)
+	}
+	if got := strings.Join(runner.Calls[1].Args, " "); got != "--connect qemu:///system autostart --disable agents" {
+		t.Fatalf("unexpected disable command: %s", got)
+	}
+}
+
+func TestLimaAutostartRequiresSupportedVersionAndUsesBootCondition(t *testing.T) {
+	runner := &backendScriptedRunner{Outputs: []string{"limactl version 2.2.0\n"}}
+	provider := Lima{Runner: runner}
+	if err := provider.EnableAutostart(context.Background(), "agents"); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.Calls) != 2 || strings.Join(runner.Calls[1].Args, " ") != "autostart enable --condition=boot agents" {
+		t.Fatalf("unexpected Lima autostart calls: %+v", runner.Calls)
+	}
+	if err := provider.DisableAutostart(context.Background(), "agents"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(runner.Calls[2].Args, " "); got != "autostart disable agents" {
+		t.Fatalf("unexpected Lima disable command: %s", got)
+	}
+
+	runner = &backendScriptedRunner{Outputs: []string{"limactl version 2.1.0\n"}}
+	err := (Lima{Runner: runner}).EnableAutostart(context.Background(), "agents")
+	if err == nil || !strings.Contains(err.Error(), "upgrade to Lima 2.2 or newer") {
+		t.Fatalf("expected actionable old-Lima error, got %v", err)
+	}
+	if len(runner.Calls) != 1 {
+		t.Fatalf("old Lima was given an autostart command: %+v", runner.Calls)
+	}
+}
+
+func TestLibvirtAutostartArtifactsAreValidatedAndShellFree(t *testing.T) {
+	c := model.DefaultConfig("/state")
+	c.VMName = "host-boot-vm"
+	runner := &backendScriptedRunner{}
+	provider := Libvirt{Runner: runner}
+	if err := provider.ConfigureAutostart(context.Background(), Spec{Config: c}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.Calls) != 5 {
+		t.Fatalf("unexpected host artifact calls: %+v", runner.Calls)
+	}
+	rules := runner.Inputs[1]
+	unit := runner.Inputs[2]
+	if !strings.Contains(rules, "table ip "+artifacts.ForwardingTableName(c.VMName)) || !strings.Contains(rules, "dnat to "+artifacts.LibvirtGuestAddress(c.VMName)+":6768") {
+		t.Fatalf("host rules are not for the stable VM target: %s", rules)
+	}
+	for _, value := range []string{unit, rules} {
+		if strings.Contains(value, "sh -c") || strings.Contains(value, "eval ") || strings.Contains(value, c.VMName) {
+			t.Fatalf("host autostart artifact contains unsafe/user-controlled text: %s", value)
+		}
+	}
+	for _, call := range runner.Calls {
+		for _, arg := range call.Args {
+			if arg == "sh" || arg == "-c" || arg == "eval" {
+				t.Fatalf("shell execution leaked into autostart command: %+v", call)
+			}
+		}
+	}
+
+	c.VMName = "bad vm"
+	runner = &backendScriptedRunner{}
+	if err := (Libvirt{Runner: runner}).ConfigureAutostart(context.Background(), Spec{Config: c}); err == nil {
+		t.Fatal("invalid VM name was accepted for host autostart")
+	}
+	if len(runner.Calls) != 0 {
+		t.Fatalf("invalid host autostart configuration ran commands: %+v", runner.Calls)
+	}
+}
+
 func TestLimaExecAsRootUsesProviderSudoWrapper(t *testing.T) {
 	runner := &execx.RecordingRunner{}
 	if err := (Lima{Runner: runner}).ExecAsRoot(context.Background(), "agents", []string{"/bin/bash", "-s"}, strings.NewReader("true\n"), io.Discard, io.Discard); err != nil {

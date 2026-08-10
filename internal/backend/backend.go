@@ -49,6 +49,22 @@ type InstructionRefresher interface {
 	RefreshAgentInstructions(context.Context, string, string) error
 }
 
+// Autostarter registers or unregisters a persistent provider-level boot
+// action. Registration is deliberately separate from Start: enabling
+// autostart must not launch a VM in the current session.
+type Autostarter interface {
+	EnableAutostart(context.Context, string) error
+	DisableAutostart(context.Context, string) error
+}
+
+// AutostartArtifacts is implemented by providers whose host networking needs
+// a companion boot artifact in addition to the provider registration. The
+// CLI coordinates this facet with Autostarter transactionally.
+type AutostartArtifacts interface {
+	ConfigureAutostart(context.Context, Spec) error
+	RemoveAutostart(context.Context, Spec) error
+}
+
 // The narrower interfaces keep lifecycle, networking, forwarding,
 // provisioning, and inspection independently fakeable in unit tests. Provider
 // combines the operations needed by the CLI while implementations may expose
