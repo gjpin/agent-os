@@ -126,6 +126,8 @@ func TestProfileSetupScriptRoutesCrossAgentState(t *testing.T) {
 	for _, expected := range []string{
 		`"$profile_root/agents"`,
 		`route_profile_tree /home/agent/.agents "$profile_root/agents"`,
+		`"$profile_root/orca"`,
+		`route_profile_tree /home/agent/.config/orca "$profile_root/orca"`,
 	} {
 		if !strings.Contains(script, expected) {
 			t.Errorf("profile setup script omits %q", expected)

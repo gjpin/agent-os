@@ -462,6 +462,7 @@ resize2fs "$profile_device"
 install -d -o agent -g agent -m 0700 "$profile_root"
 install -d -o agent -g agent -m 0700 \
   "$profile_root/opencode/config" "$profile_root/opencode/data" \
+  "$profile_root/orca" \
   "$profile_root/codex" "$profile_root/claude" "$profile_root/pi-agent" \
   "$profile_root/copilot" "$profile_root/agents" "$profile_root/agent-os" \
   "$profile_root/legacy"
@@ -487,6 +488,7 @@ route_profile_tree() {
 }
 
 route_profile_tree /home/agent/.config/opencode "$profile_root/opencode/config"
+route_profile_tree /home/agent/.config/orca "$profile_root/orca"
 route_profile_tree /home/agent/.local/share/opencode "$profile_root/opencode/data"
 route_profile_tree /home/agent/.codex "$profile_root/codex"
 route_profile_tree /home/agent/.claude "$profile_root/claude"

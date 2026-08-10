@@ -92,6 +92,32 @@ Set `profiles.disk_gib`, `--profile-disk-gib`, or
 only grow. Ordinary `destroy` retains the disk; `destroy --purge-profiles`
 deletes it after confirmed shutdown and detachment.
 
+### Paths preserved across VM replacement
+
+The retained profile disk is mounted at `/var/lib/agent-os/profile` inside the
+VM. The following guest paths are routed onto it and survive ordinary VM
+replacement with the same VM name:
+
+| Guest path | Profile-disk path |
+| --- | --- |
+| `/home/agent/.config/opencode` | `opencode/config` |
+| `/home/agent/.config/orca` | `orca` |
+| `/home/agent/.local/share/opencode` | `opencode/data` |
+| `/home/agent/.codex` | `codex` |
+| `/home/agent/.claude` | `claude` |
+| `/home/agent/.pi/agent` | `pi-agent` |
+| `/home/agent/.copilot` | `copilot` |
+| `/home/agent/.agents` | `agents` |
+| `/home/agent/.agent-os` | `agent-os` |
+| `/home/agent/.claude.json` | `claude.json` |
+
+The first nine paths are symlinked into the profile disk during provisioning.
+`/home/agent/.claude.json` is copied to and restored from the profile disk by
+the profile sync command before shutdown and after startup. Existing content
+found at a routed path is retained under `/var/lib/agent-os/profile/legacy/`
+when the path is first converted. All of these paths are removed only when
+the profile is explicitly purged with `destroy --purge-profiles`.
+
 ## Guest toolset and extra packages
 
 Every new Fedora 44 VM receives the same baseline on libvirt/x86_64 and

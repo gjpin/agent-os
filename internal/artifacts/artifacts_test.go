@@ -184,7 +184,7 @@ func TestProfileArtifactsAttachSeparatePersistentDiskAndRouteState(t *testing.T)
 	for _, expected := range []string{
 		"additionalDisks:", "format: true", "fsType: ext4",
 		"/var/lib/agent-os/profile", "nodev,nosuid",
-		"/home/agent/.codex", "/home/agent/.agents", "/home/agent/.claude.json", "cli_auth_credentials_store = \"file\"",
+		"/home/agent/.codex", "/home/agent/.agents", "/home/agent/.config/orca", "/home/agent/.claude.json", "cli_auth_credentials_store = \"file\"",
 	} {
 		if !strings.Contains(lima, expected) {
 			t.Errorf("profile Lima artifact omits %q", expected)
