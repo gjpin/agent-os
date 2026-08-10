@@ -20,6 +20,16 @@
 - During development, check the latest relevant documentation when implementation details, APIs, tooling, dependencies, configuration, or recommended practices may have changed.
 - When you need to explore or find something across a Git repository rather than inspect a specific file or URL, prefer cloning the repository into a temporary directory and searching it locally instead of making many separate requests for individual files.
 
+## Chrome DevTools MCP
+
+- Chrome DevTools MCP and its CLI are installed in the VM for browser debugging. Chromium is supported on a best-effort basis; launch it with:
+
+  ```sh
+  chrome-devtools start --headless --executable-path="$(command -v chromium)"
+  ```
+
+- Use `agent-os skills install [name]` to apply the configured package and skills to an existing VM.
+
 ## GitHub Actions
 
 - When creating or updating GitHub Actions workflows, always use the latest stable release of each action.

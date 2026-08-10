@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gjpin/agent-os/internal/provision"
 )
 
 func envMap(values map[string]string) func(string) (string, bool) {
@@ -51,6 +53,69 @@ func TestLoadPrecedenceAndSources(t *testing.T) {
 	}
 	if resolved.Config.ProfileDiskGiB != 10 || resolved.Sources["profiles.disk_gib"] != SourceDefault {
 		t.Fatalf("profile disk default was not used: value=%d source=%s", resolved.Config.ProfileDiskGiB, resolved.Sources["profiles.disk_gib"])
+	}
+}
+
+func TestSkillsDefaultAndConfigAreAdditive(t *testing.T) {
+	dir := t.TempDir()
+	resolved, err := Load(LoadOptions{EnvLookup: envMap(map[string]string{
+		"HOME": dir, "XDG_STATE_HOME": filepath.Join(dir, "state"),
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved.Config.Skills) != 1 || resolved.Config.Skills[0] != provision.DefaultChromeDevToolsSkillURL {
+		t.Fatalf("unexpected default skills: %v", resolved.Config.Skills)
+	}
+
+	path := filepath.Join(dir, "skills.yaml")
+	custom := "https://github.com/example/agent-skills/tree/main/browser"
+	if err := os.WriteFile(path, []byte("skills:\n  - "+custom+"\n  - "+provision.DefaultChromeDevToolsSkillURL+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err = Load(LoadOptions{ExplicitConfigPath: path, EnvLookup: envMap(map[string]string{
+		"HOME": dir, "XDG_STATE_HOME": filepath.Join(dir, "state"),
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(resolved.Config.Skills, "\n"), strings.Join([]string{provision.DefaultChromeDevToolsSkillURL, custom}, "\n"); got != want {
+		t.Fatalf("unexpected additive skills: got %q want %q", got, want)
+	}
+	if resolved.Sources["skills"] != SourceFile {
+		t.Fatalf("skills source = %q, want config-file", resolved.Sources["skills"])
+	}
+	contents, err := resolved.ConfigYAML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(contents), "skills:") || !strings.Contains(string(contents), custom) {
+		t.Fatalf("config YAML omitted skills: %s", contents)
+	}
+}
+
+func TestSkillsRejectNonGitHubTreeURLs(t *testing.T) {
+	dir := t.TempDir()
+	invalid := []string{
+		"http://github.com/example/repo/tree/main/skill",
+		"https://gitlab.com/example/repo/tree/main/skill",
+		"https://github.com/example/repo/blob/main/SKILL.md",
+		"https://github.com/example/repo/tree/main",
+		"https://github.com.example/repo/tree/main/skill",
+		"https://github.com/example/repo/tree/main/skill?download=1",
+	}
+	for _, skill := range invalid {
+		t.Run(skill, func(t *testing.T) {
+			path := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(path, []byte("skills:\n  - "+skill+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(LoadOptions{ExplicitConfigPath: path, EnvLookup: envMap(map[string]string{
+				"HOME": dir, "XDG_STATE_HOME": filepath.Join(dir, "state"),
+			})}); err == nil || !strings.Contains(err.Error(), "skill URL") {
+				t.Fatalf("expected skill URL validation error, got %v", err)
+			}
+		})
 	}
 }
 

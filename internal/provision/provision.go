@@ -2,6 +2,7 @@ package provision
 
 import (
 	"fmt"
+	"net/url"
 	"path"
 	"regexp"
 	"sort"
@@ -20,7 +21,131 @@ const (
 	AgentManagedPath               = "/home/agent/.local/bin:/home/agent/.opencode/bin:/usr/local/bin:/usr/bin:/bin"
 	ProfileMountPath               = "/var/lib/agent-os/profile"
 	ProfileSyncPath                = "/usr/local/libexec/agent-os-profile-sync"
+	DefaultChromeDevToolsSkillURL  = "https://github.com/ChromeDevTools/chrome-devtools-mcp/tree/main/skills/chrome-devtools-cli"
 )
+
+var defaultSkills = []string{DefaultChromeDevToolsSkillURL}
+
+// DefaultSkills returns a copy of the skills installed in every new VM.
+func DefaultSkills() []string { return append([]string(nil), defaultSkills...) }
+
+// MergeSkills keeps the built-in skill and returns a stable duplicate-free
+// list without removing unrelated skills already present in the guest profile.
+func MergeSkills(additions []string) []string {
+	seen := make(map[string]struct{}, len(defaultSkills)+len(additions))
+	result := make([]string, 0, len(defaultSkills)+len(additions))
+	all := make([]string, 0, len(defaultSkills)+len(additions))
+	all = append(all, defaultSkills...)
+	all = append(all, additions...)
+	for _, skill := range all {
+		if _, ok := seen[skill]; ok {
+			continue
+		}
+		seen[skill] = struct{}{}
+		result = append(result, skill)
+	}
+	return result
+}
+
+// ValidateSkills accepts only public GitHub tree URLs. Restricting the source
+// form keeps provisioning deterministic and prevents arbitrary URL schemes or
+// hosts from becoming guest bootstrap commands.
+func ValidateSkills(skills []string) error {
+	for _, skill := range skills {
+		if err := validateSkillURL(skill); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func SkillManifest(additions []string) ([]string, error) {
+	if err := ValidateSkills(additions); err != nil {
+		return nil, err
+	}
+	return MergeSkills(additions), nil
+}
+
+func renderSkillInstallCommands(skills []string) string {
+	var b strings.Builder
+	for _, skill := range skills {
+		fmt.Fprintf(&b, "run_as_agent skills add %s --global --copy --agent cline --yes\n", shellQuote(skill))
+	}
+	return b.String()
+}
+
+// ChromeDevToolsScript returns the root-run, repeatable guest-local installer
+// for Chrome DevTools MCP and the configured skills. It deliberately runs the
+// npm and skill installers as agent so their files are owned by the user and
+// land on the managed guest PATH/profile.
+func ChromeDevToolsScript(configuredSkills ...[]string) string {
+	skills := DefaultSkills()
+	if len(configuredSkills) > 0 {
+		manifest, err := SkillManifest(configuredSkills[0])
+		if err != nil {
+			return invalidProvisionScript(err)
+		}
+		skills = manifest
+	}
+	return `#!/bin/bash
+set -euo pipefail
+
+readonly agent_home=/home/agent
+readonly managed_path=/home/agent/.local/bin:/home/agent/.opencode/bin:/usr/local/bin:/usr/bin:/bin
+
+install -d -o agent -g agent -m 0755 "$agent_home/.local/bin" "$agent_home/.agents/skills"
+
+run_as_agent() {
+  /usr/sbin/runuser --user agent -- /usr/bin/env \
+    HOME="$agent_home" SHELL=/bin/bash PATH="$managed_path" \
+    CODEX_HOME="$agent_home/.codex" COPILOT_HOME="$agent_home/.copilot" "$@"
+}
+
+run_as_agent /usr/bin/npm install --global --ignore-scripts \
+  --prefix "$agent_home/.local" chrome-devtools-mcp@latest skills@latest
+` + renderSkillInstallCommands(skills) + `
+for executable in chrome-devtools chrome-devtools-mcp; do
+  run_as_agent /bin/sh -c 'resolved=$(command -v "$1") && test -x "$resolved"' sh "$executable"
+done
+run_as_agent /bin/sh -c 'test -n "$(find "$HOME/.agents/skills" -name SKILL.md -print -quit)"'
+`
+}
+
+func invalidProvisionScript(err error) string {
+	return "#!/bin/bash\nset -eu\necho " + shellQuote(err.Error()) + " >&2\nexit 1\n"
+}
+
+func chromeDevToolsInstallBlock(skills []string) string {
+	return `
+run_as_agent /usr/bin/npm install --global --ignore-scripts \
+  --prefix "$agent_home/.local" chrome-devtools-mcp@latest skills@latest
+` + renderSkillInstallCommands(skills) + `
+for executable in chrome-devtools chrome-devtools-mcp; do
+  run_as_agent /bin/sh -c 'resolved=$(command -v "$1") && test -x "$resolved"' sh "$executable"
+done
+run_as_agent /bin/sh -c 'test -n "$(find "$HOME/.agents/skills" -name SKILL.md -print -quit)"'
+`
+}
+
+func validateSkillURL(value string) error {
+	if strings.TrimSpace(value) != value || value == "" || len(value) > 2048 {
+		return fmt.Errorf("invalid skill URL %q: must be an HTTPS GitHub tree URL", value)
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Host != "github.com" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("invalid skill URL %q: must be an HTTPS GitHub tree URL", value)
+	}
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if len(parts) < 5 || parts[0] == "" || parts[1] == "" || parts[2] != "tree" || parts[3] == "" || parts[len(parts)-1] == "" {
+		return fmt.Errorf("invalid skill URL %q: must be an HTTPS GitHub tree URL", value)
+	}
+	for _, part := range parts {
+		if part == "." || part == ".." || strings.ContainsAny(part, "\r\n\t") {
+			return fmt.Errorf("invalid skill URL %q: must be an HTTPS GitHub tree URL", value)
+		}
+	}
+	return nil
+}
 
 // ProfileMountSpec describes the provider-specific block-device presentation
 // without putting host paths or credentials into guest configuration.
@@ -92,7 +217,15 @@ func mergePackageSets(sets ...[]string) []string {
 // coding agents included in every VM. Upstream installers intentionally select
 // their latest release at first boot; the marker prevents a later provisioning
 // replay from unexpectedly upgrading an existing VM.
-func CodingAgentsScript() string {
+func CodingAgentsScript(configuredSkills ...[]string) string {
+	skills := DefaultSkills()
+	if len(configuredSkills) > 0 {
+		manifest, err := SkillManifest(configuredSkills[0])
+		if err != nil {
+			return invalidProvisionScript(err)
+		}
+		skills = manifest
+	}
 	return `#!/bin/bash
 set -euo pipefail
 
@@ -118,7 +251,7 @@ for executable in node npm terraform; do
   resolved=$(command -v "$executable")
   test -x "$resolved"
 done
-install -d -o agent -g agent -m 0755 "$agent_home/.local/bin" "$agent_home/.opencode/bin"
+install -d -o agent -g agent -m 0755 "$agent_home/.local/bin" "$agent_home/.opencode/bin" "$agent_home/.agents/skills"
 
 installer_dir=$(mktemp -d /tmp/agent-os-coding-agents.XXXXXX)
 cleanup() {
@@ -154,6 +287,8 @@ run_as_agent /bin/bash "$installer_dir/claude.sh" latest
 
 run_as_agent /usr/bin/npm install --global --ignore-scripts \
   --prefix "$agent_home/.local" @earendil-works/pi-coding-agent
+
+` + chromeDevToolsInstallBlock(skills) + `
 
 download_installer https://gh.io/copilot-install "$installer_dir/copilot.sh"
 run_as_agent /usr/bin/env PREFIX="$agent_home/.local" \

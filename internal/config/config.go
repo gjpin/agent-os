@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gjpin/agent-os/internal/model"
+	"github.com/gjpin/agent-os/internal/provision"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 )
@@ -38,6 +39,7 @@ var documentedEnv = map[string]string{
 	"state.dir":             "AGENT_OS_STATE_DIR",
 	"log.format":            "AGENT_OS_LOG_FORMAT",
 	"packages":              "AGENT_OS_PACKAGES",
+	"skills":                "AGENT_OS_SKILLS",
 }
 
 // FlagValues contains only flags that were explicitly changed by a caller.
@@ -342,6 +344,7 @@ func setDefaults(v *viper.Viper, c model.Config) {
 	v.SetDefault("state.dir", c.StateDir)
 	v.SetDefault("log.format", string(c.LogFormat))
 	v.SetDefault("packages", c.Packages)
+	v.SetDefault("skills", c.Skills)
 }
 
 func readConfig(v *viper.Viper) model.Config {
@@ -349,6 +352,11 @@ func readConfig(v *viper.Viper) model.Config {
 	if allowedCIDRs == nil {
 		allowedCIDRs = []string{}
 	}
+	skills := stringSlice(v.Get("skills"))
+	// The Chrome DevTools CLI skill is a built-in capability. Configured
+	// entries are additive so an operator cannot accidentally remove it from
+	// a newly provisioned VM by replacing the top-level list.
+	skills = provision.MergeSkills(skills)
 	return model.Config{
 		VMName:             v.GetString("vm.name"),
 		VMCPUs:             v.GetInt("vm.cpus"),
@@ -365,6 +373,7 @@ func readConfig(v *viper.Viper) model.Config {
 		StateDir:           v.GetString("state.dir"),
 		LogFormat:          model.LogFormat(v.GetString("log.format")),
 		Packages:           stringSlice(v.Get("packages")),
+		Skills:             skills,
 	}
 }
 
@@ -430,6 +439,7 @@ func (r Resolved) EffectiveValues() map[string]any {
 		"state.dir":             c.StateDir,
 		"log.format":            c.LogFormat,
 		"packages":              c.Packages,
+		"skills":                c.Skills,
 	}
 }
 
@@ -459,7 +469,7 @@ func (r Resolved) ConfigYAML() ([]byte, error) {
 		fmt.Fprintf(&b, "repository:\n  key_path: %s\n", r.Config.RepositoryKeyPath)
 	}
 	fmt.Fprintf(&b, "network:\n  allowed_cidrs: %s\n", yamlList(r.Config.AllowedCIDRs))
-	fmt.Fprintf(&b, "release:\n  repository: %s\nstate:\n  dir: %s\nlog:\n  format: %s\npackages: %s\n", r.Config.ReleaseRepository, r.Config.StateDir, r.Config.LogFormat, yamlList(r.Config.Packages))
+	fmt.Fprintf(&b, "release:\n  repository: %s\nstate:\n  dir: %s\nlog:\n  format: %s\npackages: %s\nskills: %s\n", r.Config.ReleaseRepository, r.Config.StateDir, r.Config.LogFormat, yamlList(r.Config.Packages), yamlList(r.Config.Skills))
 	return []byte(b.String()), nil
 }
 

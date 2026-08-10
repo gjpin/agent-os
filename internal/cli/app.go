@@ -173,6 +173,7 @@ func (a *App) newRoot() *cobra.Command {
 	root.AddCommand(a.sshCommand())
 	root.AddCommand(a.logsCommand())
 	root.AddCommand(a.packagesCommand())
+	root.AddCommand(a.skillsCommand())
 	root.AddCommand(a.authCommand())
 	root.AddCommand(a.verifyCommand())
 	root.AddCommand(a.upgradeCommand())
@@ -273,6 +274,13 @@ func (a *App) backendSpec(c model.Config, dryRun bool) backend.Spec {
 func execAsAgent(ctx context.Context, p backend.Provider, name string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if userProvider, ok := p.(backend.UserExecutor); ok {
 		return userProvider.ExecAsUser(ctx, name, "agent", args, stdin, stdout, stderr)
+	}
+	return p.Exec(ctx, name, args, stdin, stdout, stderr)
+}
+
+func execAsRoot(ctx context.Context, p backend.Provider, name string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if rootProvider, ok := p.(backend.AdminExecutor); ok {
+		return rootProvider.ExecAsRoot(ctx, name, args, stdin, stdout, stderr)
 	}
 	return p.Exec(ctx, name, args, stdin, stdout, stderr)
 }

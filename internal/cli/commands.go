@@ -629,6 +629,27 @@ func (a *App) packagesCommand() *cobra.Command {
 	return cmd
 }
 
+func (a *App) skillsCommand() *cobra.Command {
+	cmd := &cobra.Command{Use: "skills", Short: "Manage operator-controlled guest skills"}
+	install := &cobra.Command{
+		Use:   "install [name]",
+		Short: "Install or update the configured Chrome DevTools package and skills",
+		Args:  func(cmd *cobra.Command, args []string) error { return a.nameArgs(cmd, args) },
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p, c, _, err := a.providerAndConfig(argName(args))
+			if err != nil {
+				return err
+			}
+			if err := provision.ValidateSkills(c.Skills); err != nil {
+				return err
+			}
+			return execAsRoot(cmd.Context(), p, c.VMName, []string{"/bin/bash", "-s"}, strings.NewReader(provision.ChromeDevToolsScript(c.Skills)), a.Out, a.Err)
+		},
+	}
+	cmd.AddCommand(install)
+	return cmd
+}
+
 func (a *App) authCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "auth <agent>",

@@ -84,3 +84,10 @@ type Inspection interface {
 type UserExecutor interface {
 	ExecAsUser(context.Context, string, string, []string, io.Reader, io.Writer, io.Writer) error
 }
+
+// AdminExecutor lets commands that provision guest-owned files run their
+// small root wrapper consistently across providers. The wrapper itself is
+// responsible for dropping to the agent account where appropriate.
+type AdminExecutor interface {
+	ExecAsRoot(context.Context, string, []string, io.Reader, io.Writer, io.Writer) error
+}

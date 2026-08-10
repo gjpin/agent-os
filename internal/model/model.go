@@ -52,6 +52,7 @@ type Config struct {
 	StateDir           string
 	LogFormat          LogFormat
 	Packages           []string
+	Skills             []string
 }
 
 func DefaultConfig(stateDir string) Config {
@@ -67,6 +68,7 @@ func DefaultConfig(stateDir string) Config {
 		StateDir:          stateDir,
 		LogFormat:         LogHuman,
 		Packages:          nil,
+		Skills:            provision.DefaultSkills(),
 	}
 }
 
@@ -125,6 +127,9 @@ func (c Config) Validate() error {
 		problems = append(problems, "log.format must be human or json")
 	}
 	if err := provision.ValidatePackages(c.Packages); err != nil {
+		problems = append(problems, err.Error())
+	}
+	if err := provision.ValidateSkills(c.Skills); err != nil {
 		problems = append(problems, err.Error())
 	}
 	if len(problems) > 0 {

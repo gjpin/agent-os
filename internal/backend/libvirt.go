@@ -749,6 +749,10 @@ func (l Libvirt) Exec(ctx context.Context, name string, args []string, stdin io.
 	return l.execGuest(ctx, name, args, stdin, stdout, stderr)
 }
 
+func (l Libvirt) ExecAsRoot(ctx context.Context, name string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	return l.Exec(ctx, name, args, stdin, stdout, stderr)
+}
+
 // ExecAsUser keeps the Linux backend's management path consistent with Lima:
 // ordinary guest commands run as the unprivileged agent account, while the
 // administrative Provider.Exec path remains available for host-controlled

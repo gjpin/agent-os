@@ -192,6 +192,10 @@ func (l Lima) Exec(ctx context.Context, name string, args []string, stdin io.Rea
 	return command(l.Runner, ctx, "limactl", append([]string{"shell", name, "--"}, args...), stdin, stdout, stderr)
 }
 
+func (l Lima) ExecAsRoot(ctx context.Context, name string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	return command(l.Runner, ctx, "limactl", append([]string{"shell", name, "--", "sudo"}, args...), stdin, stdout, stderr)
+}
+
 func (l Lima) ExecAsUser(ctx context.Context, name, user string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if user != "agent" {
 		return fmt.Errorf("unsupported guest user %q", user)

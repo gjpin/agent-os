@@ -25,6 +25,7 @@ type VMDefinition struct {
 	AccessMode        model.AccessMode
 	OrcaPort          int
 	Packages          []string
+	Skills            []string
 	ImagePath         string
 	BindAddress       string
 	PairingAddress    string
@@ -53,6 +54,7 @@ func FromConfig(c model.Config, architecture string) VMDefinition {
 		Name: c.VMName, CPUs: c.VMCPUs, MemoryMiB: c.VMMemoryMiB,
 		DiskGiB: c.VMDiskGiB, Architecture: architecture,
 		AccessMode: c.AccessMode, OrcaPort: c.OrcaPort, Packages: packages,
+		Skills: append([]string(nil), c.Skills...),
 		// The WireGuard address is on the host, not in the guest. The host
 		// forwarding layer selects the externally reachable address while
 		// Orca listens on the guest NIC.
@@ -208,7 +210,7 @@ func LimaYAML(def VMDefinition) (string, error) {
 	}
 	agentInstructionsScript := provision.AgentInstructionsScript(def.AgentInstructions)
 	kindPodmanScript := provision.KindPodmanScript()
-	codingAgentsScript := provision.CodingAgentsScript()
+	codingAgentsScript := provision.CodingAgentsScript(def.Skills)
 	firewallArgs := optionalPort(def.OrcaPort)
 	firewallRules, err := FirewallRulesChecked(def.AllowedCIDRs, firewallArgs...)
 	if err != nil {
@@ -329,7 +331,7 @@ func cloudInit(def VMDefinition, repositoryKeyPath string) (string, error) {
 	b.WriteString("  - path: /usr/local/libexec/agent-os-setup-kind-podman\n    permissions: '0700'\n    content: |\n")
 	appendIndented(&b, provision.KindPodmanScript(), "      ")
 	b.WriteString("  - path: /usr/local/libexec/agent-os-install-coding-agents\n    permissions: '0700'\n    content: |\n")
-	appendIndented(&b, provision.CodingAgentsScript(), "      ")
+	appendIndented(&b, provision.CodingAgentsScript(def.Skills), "      ")
 	b.WriteString("  - path: /etc/agent-os/firewall.rules\n    permissions: '0600'\n    content: |\n")
 	appendIndented(&b, strings.Join(firewallRules, "\n"), "      ")
 	orcaInstallScript, err := releases.OrcaInstallScript(def.Architecture)

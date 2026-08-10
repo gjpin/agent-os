@@ -72,6 +72,21 @@ func TestPackageManifestMergesAdditionsDeterministically(t *testing.T) {
 	}
 }
 
+func TestSkillManifestKeepsBuiltInAndDeduplicatesConfiguredSkills(t *testing.T) {
+	custom := "https://github.com/example/agent-skills/tree/main/browser"
+	got, err := SkillManifest([]string{custom, DefaultChromeDevToolsSkillURL, custom})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{DefaultChromeDevToolsSkillURL, custom}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("skill manifest = %v, want %v", got, want)
+	}
+	if _, err := SkillManifest([]string{"https://github.com/example/repo/blob/main/SKILL.md"}); err == nil {
+		t.Fatal("skill manifest accepted a GitHub blob URL")
+	}
+}
+
 func TestAgentInstructionsScriptContainsAllManagedDestinations(t *testing.T) {
 	content := "instructions '$HOME'\nwith a trailing newline\n"
 	script := AgentInstructionsScript(content)
@@ -221,6 +236,10 @@ func TestCodingAgentsScriptContainsRequiredInstallersAndSafetyControls(t *testin
 		"HOME=\"$agent_home\" SHELL=/bin/bash PATH=\"$managed_path\"",
 		"--no-modify-path",
 		"--global --ignore-scripts",
+		"chrome-devtools-mcp@latest skills@latest",
+		"run_as_agent skills add 'https://github.com/ChromeDevTools/chrome-devtools-mcp/tree/main/skills/chrome-devtools-cli' --global --copy --agent cline --yes",
+		"for executable in chrome-devtools chrome-devtools-mcp",
+		"find \"$HOME/.agents/skills\" -name SKILL.md",
 		"command -v \"$1\"",
 		"grep -Fqx \"$path_line\"",
 		"touch \"$ready_marker\"",
@@ -258,6 +277,30 @@ func TestCodingAgentsScriptContainsRequiredInstallersAndSafetyControls(t *testin
 	}
 	if strings.Count(script, "readonly path_line=") != 1 {
 		t.Fatal("managed PATH line is not defined exactly once")
+	}
+}
+
+func TestChromeDevToolsScriptIsRepeatableAndUsesGuestOwnedPaths(t *testing.T) {
+	custom := "https://github.com/example/agent-skills/tree/main/browser"
+	script := ChromeDevToolsScript([]string{custom})
+	command := exec.Command("bash", "-n")
+	command.Stdin = strings.NewReader(script)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Chrome DevTools installer is not valid Bash: %v\n%s", err, output)
+	}
+	for _, expected := range []string{
+		"--prefix \"$agent_home/.local\" chrome-devtools-mcp@latest skills@latest",
+		"$agent_home/.agents/skills",
+		custom,
+		"--global --copy --agent cline --yes",
+		"command -v \"$1\"",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Errorf("Chrome DevTools installer omits %q", expected)
+		}
+	}
+	if strings.Contains(script, "skills remove") {
+		t.Fatal("skill installer removes unlisted skills")
 	}
 }
 

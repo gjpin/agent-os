@@ -133,6 +133,16 @@ func TestLimaUsesArgumentArrays(t *testing.T) {
 	}
 }
 
+func TestLimaExecAsRootUsesProviderSudoWrapper(t *testing.T) {
+	runner := &execx.RecordingRunner{}
+	if err := (Lima{Runner: runner}).ExecAsRoot(context.Background(), "agents", []string{"/bin/bash", "-s"}, strings.NewReader("true\n"), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.Calls) != 1 || strings.Join(runner.Calls[0].Args, " ") != "shell agents -- sudo /bin/bash -s" {
+		t.Fatalf("unexpected Lima root execution: %+v", runner.Calls)
+	}
+}
+
 func TestLimaStartSurfacesProvisioningReadinessFailures(t *testing.T) {
 	runner := &backendScriptedRunner{Errors: []error{nil, errors.New("marker absent")}}
 	err := (Lima{Runner: runner}).Start(context.Background(), "agents")
@@ -655,6 +665,9 @@ func TestDryRunProvidersIncludeAgentInstructions(t *testing.T) {
 				"dnf install -y -- adoptium-temurin-java-repository",
 				"dnf config-manager setopt adoptium.enabled=1",
 				"dnf install -y -- temurin-25-jdk",
+				"--prefix \"$agent_home/.local\" chrome-devtools-mcp@latest skills@latest",
+				"chrome-devtools chrome-devtools-mcp",
+				provision.DefaultChromeDevToolsSkillURL,
 			} {
 				if !strings.Contains(artifact, expected) {
 					t.Errorf("artifact omits %q", expected)

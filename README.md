@@ -26,6 +26,8 @@ The project is intentionally conservative about trust boundaries:
   instruction paths linked to that canonical file;
 - OpenCode, Codex CLI, Claude Code, Pi, and GitHub Copilot CLI are preinstalled
   for the unprivileged `agent` user;
+- Chrome DevTools MCP, its `chrome-devtools` CLI, and configured GitHub skills
+  are installed only inside agent VMs;
 - a complete development and operations toolset, including Node.js 24,
   Eclipse Temurin 25 JDK, and Terraform, is installed during first boot;
 - `create --dry-run` generates provider artifacts without touching libvirt or
@@ -39,6 +41,7 @@ go run . config validate
 go run . setup-host
 go run . create --dry-run agents
 go run . start agents
+go run . skills install agents
 go run . destroy --yes --purge-profiles agents
 go run . completion zsh > ~/.zfunc/_agent-os
 ```
@@ -55,6 +58,34 @@ must be destroyed and recreated to receive the complete baseline; `upgrade`
 does not retrofit or refresh first-boot tools. If
 `internal/instructions/AGENTS.md` changes, rebuild the `agent-os` binary before
 creating new VMs.
+
+The top-level `skills` configuration list accepts public GitHub tree URLs. The
+built-in Chrome DevTools CLI skill is always included; configured entries are
+additive. `agent-os skills install [name]` applies package and skill updates to
+an existing VM. The persistent `/home/agent/.agents/skills` tree is shared by
+the coding agents and survives VM replacement.
+
+### Adding skills manually
+
+Edit `~/.config/agent-os/config.yaml` (or the path shown by
+`agent-os config show`) and add a public GitHub tree URL:
+
+```yaml
+skills:
+  - https://github.com/example/repo/tree/main/path/to/skill
+```
+
+The built-in Chrome DevTools skill remains enabled. Apply the change to an
+existing VM with:
+
+```sh
+agent-os skills install agents
+```
+
+Skills installed in `/home/agent/.agents/skills` are stored on the persistent
+agent profile and survive ordinary VM recreation with the same name. They are
+deleted only when the profile is explicitly purged with
+`destroy --purge-profiles`; skills stored elsewhere are not preserved.
 
 Set `profiles.disk_gib`, `--profile-disk-gib`, or
 `AGENT_OS_PROFILE_DISK_GIB` to change the profile disk minimum. Existing disks
