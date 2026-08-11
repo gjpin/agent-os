@@ -170,6 +170,7 @@ func (a *App) newRoot() *cobra.Command {
 	root.AddCommand(a.lifecycleCommand("start"))
 	root.AddCommand(a.lifecycleCommand("stop"))
 	root.AddCommand(a.statusCommand())
+	root.AddCommand(a.autostartCommand())
 	root.AddCommand(a.sshCommand())
 	root.AddCommand(a.logsCommand())
 	root.AddCommand(a.packagesCommand())

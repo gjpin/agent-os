@@ -306,6 +306,38 @@ func TestChromeDevToolsScriptIsRepeatableAndUsesGuestOwnedPaths(t *testing.T) {
 	}
 }
 
+func TestOrcaSkillsScriptInstallsSharedSkillsIdempotently(t *testing.T) {
+	script := OrcaSkillsScript()
+	command := exec.Command("bash", "-n")
+	command.Stdin = strings.NewReader(script)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Orca skills installer is not valid Bash: %v\n%s", err, output)
+	}
+	for _, expected := range []string{
+		"set -euo pipefail",
+		"readonly ready_marker=/var/lib/agent-os/orca-skills-ready",
+		"if [ -f \"$ready_marker\" ]",
+		"$agent_home/.agents/skills",
+		"/usr/sbin/runuser --user agent -- /usr/bin/env",
+		"/usr/bin/orca skills install \\",
+		"--skill orca-cli",
+		"--skill orchestration",
+		"--agent universal",
+		"/usr/bin/orca skills update --all",
+		"touch \"$ready_marker\"",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Errorf("Orca skills installer omits %q", expected)
+		}
+	}
+	if strings.Index(script, "if [ -f \"$ready_marker\" ]") > strings.Index(script, "/usr/bin/orca skills install") {
+		t.Fatal("idempotency guard runs after skill installation")
+	}
+	if strings.Contains(script, "account add") || strings.Contains(script, " login") {
+		t.Fatal("Orca skills bootstrap contains an interactive authentication command")
+	}
+}
+
 func TestKindPodmanScriptContainsRootlessPrerequisites(t *testing.T) {
 	script := KindPodmanScript()
 	command := exec.Command("bash", "-n")

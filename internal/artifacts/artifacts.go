@@ -211,6 +211,7 @@ func LimaYAML(def VMDefinition) (string, error) {
 	agentInstructionsScript := provision.AgentInstructionsScript(def.AgentInstructions)
 	kindPodmanScript := provision.KindPodmanScript()
 	codingAgentsScript := provision.CodingAgentsScript(def.Skills)
+	orcaSkillsScript := provision.OrcaSkillsScript()
 	firewallArgs := optionalPort(def.OrcaPort)
 	firewallRules, err := FirewallRulesChecked(def.AllowedCIDRs, firewallArgs...)
 	if err != nil {
@@ -244,14 +245,30 @@ func LimaYAML(def VMDefinition) (string, error) {
 	b.WriteString("      cat > /run/agent-os-install-orca <<'AGENT_OS_ORCA_INSTALL'\n")
 	appendIndented(&b, orcaInstallScript, "      ")
 	b.WriteString("      AGENT_OS_ORCA_INSTALL\n      /bin/bash /run/agent-os-install-orca\n")
+	b.WriteString("      cat > /run/agent-os-install-orca-skills <<'AGENT_OS_ORCA_SKILLS'\n")
+	appendIndented(&b, orcaSkillsScript, "      ")
+	b.WriteString("      AGENT_OS_ORCA_SKILLS\n      /bin/bash /run/agent-os-install-orca-skills\n")
 	b.WriteString("      install -d -m 0755 /etc/agent-os\n      cat > /etc/systemd/system/orca.service <<'AGENT_OS_ORCA_UNIT'\n")
-	appendIndented(&b, OrcaSystemdUnit(def.OrcaPort, def.BindAddress, def.PairingAddress), "      ")
+	orcaUnit := OrcaSystemdUnit(def.OrcaPort, def.BindAddress, def.PairingAddress)
+	if def.ProfileDiskID != "" {
+		orcaUnit = OrcaSystemdUnitWithProfile(def.OrcaPort, def.BindAddress, def.PairingAddress)
+	}
+	appendIndented(&b, orcaUnit, "      ")
 	b.WriteString("      AGENT_OS_ORCA_UNIT\n")
+	if def.ProfileDiskID != "" {
+		b.WriteString("      cat > /etc/systemd/system/agent-os-profile-restore.service <<'AGENT_OS_PROFILE_RESTORE_UNIT'\n")
+		appendIndented(&b, provision.ProfileRestoreSystemdUnit(), "      ")
+		b.WriteString("      AGENT_OS_PROFILE_RESTORE_UNIT\n")
+	}
 	b.WriteString("      cat > /etc/agent-os/firewall.rules <<'AGENT_OS_FIREWALL'\n")
 	appendIndented(&b, strings.Join(firewallRules, "\n"), "      ")
 	b.WriteString("      AGENT_OS_FIREWALL\n      cat > /etc/systemd/system/agent-os-firewall.service <<'AGENT_OS_FIREWALL_UNIT'\n")
 	appendIndented(&b, FirewallSystemdUnit(), "      ")
-	b.WriteString("      AGENT_OS_FIREWALL_UNIT\n      systemctl daemon-reload\n      systemctl enable --now agent-os-firewall.service\n      systemctl enable --now orca.service\n")
+	b.WriteString("      AGENT_OS_FIREWALL_UNIT\n      systemctl daemon-reload\n")
+	if def.ProfileDiskID != "" {
+		b.WriteString("      systemctl enable --now agent-os-profile-restore.service\n")
+	}
+	b.WriteString("      systemctl enable --now agent-os-firewall.service\n      systemctl enable --now orca.service\n")
 	return b.String(), nil
 }
 
@@ -319,7 +336,11 @@ func cloudInit(def VMDefinition, repositoryKeyPath string) (string, error) {
 		fmt.Fprintf(&b, "  - path: %s\n    owner: root:root\n    permissions: '0600'\n    defer: true\n    encoding: b64\n    content: |\n      %s\n", strconv.Quote(guestKeyPath), encodedKey)
 	}
 	b.WriteString("  - path: /etc/systemd/system/orca.service\n    permissions: '0644'\n    content: |\n")
-	appendIndented(&b, OrcaSystemdUnit(def.OrcaPort, def.BindAddress, def.PairingAddress), "      ")
+	orcaUnit := OrcaSystemdUnit(def.OrcaPort, def.BindAddress, def.PairingAddress)
+	if def.ProfileDiskID != "" {
+		orcaUnit = OrcaSystemdUnitWithProfile(def.OrcaPort, def.BindAddress, def.PairingAddress)
+	}
+	appendIndented(&b, orcaUnit, "      ")
 	b.WriteString("  - path: /usr/local/libexec/agent-os-provision-agent-instructions\n    permissions: '0700'\n    content: |\n")
 	appendIndented(&b, provision.AgentInstructionsScript(def.AgentInstructions), "      ")
 	if def.ProfileDiskID != "" {
@@ -327,6 +348,8 @@ func cloudInit(def VMDefinition, repositoryKeyPath string) (string, error) {
 		appendIndented(&b, provision.ProfileSyncScript(), "      ")
 		b.WriteString("  - path: /usr/local/libexec/agent-os-profile-setup\n    permissions: '0700'\n    content: |\n")
 		appendIndented(&b, provision.ProfileSetupScript(provision.ProfileMountSpec{Backend: "libvirt", DiskID: def.ProfileDiskID, Label: def.ProfileDiskLabel}), "      ")
+		b.WriteString("  - path: /etc/systemd/system/agent-os-profile-restore.service\n    permissions: '0644'\n    content: |\n")
+		appendIndented(&b, provision.ProfileRestoreSystemdUnit(), "      ")
 	}
 	b.WriteString("  - path: /usr/local/libexec/agent-os-setup-kind-podman\n    permissions: '0700'\n    content: |\n")
 	appendIndented(&b, provision.KindPodmanScript(), "      ")
@@ -340,6 +363,8 @@ func cloudInit(def VMDefinition, repositoryKeyPath string) (string, error) {
 	}
 	b.WriteString("  - path: /usr/local/libexec/agent-os-install-orca\n    permissions: '0700'\n    content: |\n")
 	appendIndented(&b, orcaInstallScript, "      ")
+	b.WriteString("  - path: /usr/local/libexec/agent-os-install-orca-skills\n    permissions: '0700'\n    content: |\n")
+	appendIndented(&b, provision.OrcaSkillsScript(), "      ")
 	b.WriteString("  - path: /etc/systemd/system/agent-os-firewall.service\n    permissions: '0644'\n    content: |\n")
 	appendIndented(&b, FirewallSystemdUnit(), "      ")
 	b.WriteString("runcmd:\n")
@@ -350,7 +375,11 @@ func cloudInit(def VMDefinition, repositoryKeyPath string) (string, error) {
 	b.WriteString("  - [bash, /usr/local/libexec/agent-os-setup-kind-podman]\n")
 	b.WriteString("  - [bash, /usr/local/libexec/agent-os-install-coding-agents]\n")
 	b.WriteString("  - [bash, /usr/local/libexec/agent-os-install-orca]\n")
+	b.WriteString("  - [bash, /usr/local/libexec/agent-os-install-orca-skills]\n")
 	b.WriteString("  - [systemctl, daemon-reload]\n")
+	if def.ProfileDiskID != "" {
+		b.WriteString("  - [systemctl, enable, --now, agent-os-profile-restore.service]\n")
+	}
 	b.WriteString("  - [systemctl, enable, --now, agent-os-firewall.service]\n")
 	b.WriteString("  - [systemctl, enable, --now, qemu-guest-agent.service]\n")
 	b.WriteString("  - [systemctl, enable, --now, orca.service]\n")
@@ -452,6 +481,18 @@ ReadWritePaths=/home/agent
 [Install]
 WantedBy=multi-user.target
 `, port, pairing, port, bindAddress)
+}
+
+// OrcaSystemdUnitWithProfile makes the profile restore a hard dependency of
+// Orca. If the profile cannot be mounted or restored, Orca must not start on
+// an empty guest home and risk writing state outside the retained disk.
+func OrcaSystemdUnitWithProfile(port int, bindAddress string, pairingAddress ...string) string {
+	unit := OrcaSystemdUnit(port, bindAddress, pairingAddress...)
+	return strings.Replace(unit,
+		"After=network-online.target\nWants=network-online.target",
+		"After=network-online.target agent-os-profile-restore.service\nRequires=agent-os-profile-restore.service\nWants=network-online.target",
+		1,
+	)
 }
 
 func LibvirtNetworkXML(definitions ...VMDefinition) string {
@@ -590,6 +631,50 @@ func LibvirtMACAddress(name string) string {
 func ForwardingTableName(name string) string {
 	digest := sha256.Sum256([]byte(name))
 	return fmt.Sprintf("agent_os_fwd_%x", digest[:6])
+}
+
+// AutostartIdentifier is deliberately derived only from the VM name. It is
+// safe to use in systemd unit names and host file names without interpolating
+// operator-controlled text into either artifact.
+func AutostartIdentifier(name string) string {
+	digest := sha256.Sum256([]byte(name))
+	return fmt.Sprintf("agent-os-%x", digest[:8])
+}
+
+func LibvirtAutostartUnitName(name string) string {
+	return "agent-os-autostart-" + AutostartIdentifier(name) + ".service"
+}
+
+func LibvirtAutostartUnitPath(name string) string {
+	return "/etc/systemd/system/" + LibvirtAutostartUnitName(name)
+}
+
+func LibvirtAutostartRulesPath(name string) string {
+	return "/etc/agent-os/autostart-" + AutostartIdentifier(name) + ".nft"
+}
+
+// LibvirtAutostartSystemdUnit restores the host-side forwarding rules at
+// boot. All dynamic values are hash-derived identifiers or fixed validated
+// paths; the unit contains direct executable invocations and never a shell.
+func LibvirtAutostartSystemdUnit(name string) string {
+	unit := LibvirtAutostartUnitName(name)
+	rulesPath := LibvirtAutostartRulesPath(name)
+	table := ForwardingTableName(name)
+	return fmt.Sprintf(`[Unit]
+Description=agent-os host forwarding for %s
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/sysctl -w net.ipv4.ip_forward=1
+ExecStart=/usr/sbin/nft -f %s
+ExecStop=-/usr/sbin/nft delete table ip %s
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+`, unit, rulesPath, table)
 }
 
 // LinuxForwardingRules returns an IPv4 nftables ruleset for the selected host

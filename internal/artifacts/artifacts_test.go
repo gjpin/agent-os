@@ -194,6 +194,39 @@ func TestProfileArtifactsAttachSeparatePersistentDiskAndRouteState(t *testing.T)
 	if !strings.Contains(cloudInit, "agent-os-profile-"+"profile-vm") || !strings.Contains(cloudInit, "UUID=$profile_uuid") {
 		t.Fatal("cloud-init did not contain the libvirt profile setup")
 	}
+	if !strings.Contains(cloudInit, "agent-os-profile-restore.service") || !strings.Contains(cloudInit, "agent-os-profile-sync restore") {
+		t.Fatal("cloud-init did not include the profile restore unit")
+	}
+	if !strings.Contains(cloudInit, "Requires=agent-os-profile-restore.service") {
+		t.Fatal("cloud-init Orca unit does not require profile restore")
+	}
+	if !strings.Contains(lima, "agent-os-profile-restore.service") || !strings.Contains(lima, "agent-os-profile-sync restore") {
+		t.Fatal("Lima artifact did not include the profile restore unit")
+	}
+	if !strings.Contains(lima, "Requires=agent-os-profile-restore.service") {
+		t.Fatal("Lima Orca unit does not require profile restore")
+	}
+}
+
+func TestLibvirtAutostartArtifactsUseStableIdentifiers(t *testing.T) {
+	name := "a VM that must not become a unit name"
+	identifier := AutostartIdentifier(name)
+	if identifier == "" || strings.Contains(identifier, name) {
+		t.Fatalf("autostart identifier contains VM input: %q", identifier)
+	}
+	unit := LibvirtAutostartSystemdUnit(name)
+	for _, expected := range []string{
+		"ExecStart=/usr/sbin/sysctl -w net.ipv4.ip_forward=1",
+		"ExecStart=/usr/sbin/nft -f " + LibvirtAutostartRulesPath(name),
+		"ExecStop=-/usr/sbin/nft delete table ip " + ForwardingTableName(name),
+	} {
+		if !strings.Contains(unit, expected) {
+			t.Errorf("autostart unit omits %q: %s", expected, unit)
+		}
+	}
+	if strings.Contains(unit, "sh -c") || strings.Contains(unit, name) {
+		t.Fatalf("autostart unit interpolated unsafe VM text: %s", unit)
+	}
 }
 
 func TestLibvirtXMLSecurityModels(t *testing.T) {
@@ -464,12 +497,23 @@ func TestKindAndCodingAgentsInstallersAreOrderedBeforeOrcaForEveryProvider(t *te
 		packageInstall := strings.Index(artifact, "dnf install -y -- ")
 		kindSetup := strings.Index(artifact, "agent-os-setup-kind-podman")
 		agents := strings.Index(artifact, "agent-os-install-coding-agents")
-		orca := strings.Index(artifact, "agent-os-install-orca")
+		orca := strings.Index(artifact, "agent-os-install-orca\n")
+		orcaSkills := strings.Index(artifact, "agent-os-install-orca-skills")
 		if name == "Lima" && (packageInstall < 0 || !(instructions < packageInstall && packageInstall < kindSetup)) {
 			t.Fatalf("Lima package provisioning order is instructions=%d packages=%d kind=%d", instructions, packageInstall, kindSetup)
 		}
-		if instructions < 0 || kindSetup < 0 || agents < 0 || orca < 0 || !(instructions < kindSetup && kindSetup < agents && agents < orca) {
-			t.Fatalf("%s provisioning order is instructions=%d kind=%d agents=%d orca=%d", name, instructions, kindSetup, agents, orca)
+		if instructions < 0 || kindSetup < 0 || agents < 0 || orca < 0 || orcaSkills < 0 || !(instructions < kindSetup && kindSetup < agents && agents < orca && orca < orcaSkills) {
+			t.Fatalf("%s provisioning order is instructions=%d kind=%d agents=%d orca=%d orca-skills=%d", name, instructions, kindSetup, agents, orca, orcaSkills)
+		}
+		for _, command := range []string{
+			"--skill orca-cli",
+			"--skill orchestration",
+			"--agent universal",
+			"/usr/bin/orca skills update --all",
+		} {
+			if !strings.Contains(artifact, command) {
+				t.Errorf("%s artifact omits Orca skills command %q", name, command)
+			}
 		}
 		for _, endpoint := range []string{
 			"https://opencode.ai/install",
