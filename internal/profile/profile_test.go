@@ -19,6 +19,18 @@ func TestDiskIDIsDeterministicAndLengthSafe(t *testing.T) {
 	}
 }
 
+func TestDiskLabelsFitExt4AndIdentifyProvider(t *testing.T) {
+	diskID := DiskID(strings.Repeat("a", 63))
+	lima := DiskLabel("lima", diskID)
+	libvirt := DiskLabel("libvirt", diskID)
+	if len(lima) > 16 || len(libvirt) > 16 || !validDiskLabel(lima) || !validDiskLabel(libvirt) {
+		t.Fatalf("invalid ext4 labels: Lima=%q libvirt=%q", lima, libvirt)
+	}
+	if !strings.HasPrefix(lima, "lima-") || !strings.HasPrefix(libvirt, "virt-") || lima == libvirt {
+		t.Fatalf("provider identity missing from labels: Lima=%q libvirt=%q", lima, libvirt)
+	}
+}
+
 func TestMetadataStoreUsesRestrictedAtomicFiles(t *testing.T) {
 	root := t.TempDir()
 	store := NewStore(root)

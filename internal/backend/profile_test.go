@@ -88,9 +88,64 @@ func TestLibvirtProfileRejectsProviderMismatchAndUntrustedDisk(t *testing.T) {
 	}
 }
 
+func TestLimaDiskDetailsReadsJSONOutput(t *testing.T) {
+	runner := &limaProfileRunner{Output: "{\"name\":\"other\",\"size\":1073741824}\n{\"name\":\"target\",\"size\":5368709120}\n"}
+	present, size, err := limaDiskDetails(context.Background(), runner, "target", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !present || size != 5 {
+		t.Fatalf("disk details = present %v, size %d; want present true, size 5", present, size)
+	}
+	if len(runner.Calls) != 1 || runner.Calls[0].Name != "limactl" || strings.Join(runner.Calls[0].Args, " ") != "disk list --json" {
+		t.Fatalf("unexpected Lima disk inspection call: %+v", runner.Calls)
+	}
+
+	present, size, err = limaDiskDetails(context.Background(), runner, "missing", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if present || size != 0 {
+		t.Fatalf("missing disk details = present %v, size %d; want false, 0", present, size)
+	}
+}
+
+func TestLimaProfileCreatesAfterJSONDiskInspection(t *testing.T) {
+	stateDir := t.TempDir()
+	c := model.DefaultConfig(stateDir)
+	c.VMName = "lima-profile-create"
+	runner := &limaProfileRunner{}
+	if err := ensureLimaProfile(context.Background(), runner, nil, nil, Spec{Config: c}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.Calls) != 2 {
+		t.Fatalf("unexpected Lima profile calls: %+v", runner.Calls)
+	}
+	if got := strings.Join(runner.Calls[0].Args, " "); got != "disk list --json" {
+		t.Fatalf("Lima disk inspection args = %q, want %q", got, "disk list --json")
+	}
+	wantCreate := fmt.Sprintf("disk create %s --size 10GiB --format qcow2", profile.DiskID(c.VMName))
+	if got := strings.Join(runner.Calls[1].Args, " "); got != wantCreate {
+		t.Fatalf("Lima disk creation args = %q", got)
+	}
+}
+
 type profileRunner struct {
 	Calls    []execx.Invocation
 	InfoSize int64
+}
+
+type limaProfileRunner struct {
+	Calls  []execx.Invocation
+	Output string
+}
+
+func (r *limaProfileRunner) Run(_ context.Context, name string, args []string, _ io.Reader, stdout, _ io.Writer) error {
+	r.Calls = append(r.Calls, execx.Invocation{Name: name, Args: append([]string(nil), args...)})
+	if stdout != nil && name == "limactl" && len(args) >= 2 && args[0] == "disk" && args[1] == "list" {
+		_, _ = io.WriteString(stdout, r.Output)
+	}
+	return nil
 }
 
 func (r *profileRunner) Run(_ context.Context, name string, args []string, _ io.Reader, stdout, _ io.Writer) error {

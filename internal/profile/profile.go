@@ -151,17 +151,18 @@ func DiskID(name string) string {
 }
 
 func DiskLabel(provider, diskID string) string {
-	prefix := "agent-os"
+	prefix := "virt-"
 	if provider == "lima" {
-		prefix = "lima"
+		prefix = "lima-"
 	}
-	// Filesystem labels are intentionally short and contain no user data
-	// beyond the deterministic disk identity.
-	label := prefix + "-" + strings.TrimPrefix(diskID, "agent-os-profile-")
-	if len(label) > 63 {
-		label = label[:63]
+	// ext4 filesystem labels are limited to 16 bytes. Keep a provider marker
+	// and the deterministic hash suffix; the full collision-resistant disk ID
+	// remains in metadata and in the provider disk identity.
+	suffix := diskID
+	if len(suffix) > 11 {
+		suffix = suffix[len(suffix)-11:]
 	}
-	return label
+	return prefix + suffix
 }
 
 func validDiskID(value string) bool {
@@ -169,7 +170,7 @@ func validDiskID(value string) bool {
 }
 
 func validDiskLabel(value string) bool {
-	return len(value) <= 63 && regexp.MustCompile(`^[A-Za-z0-9._-]+$`).MatchString(value)
+	return len(value) <= 16 && regexp.MustCompile(`^[A-Za-z0-9._-]+$`).MatchString(value)
 }
 
 func (s Store) Save(name string, value Metadata) error {

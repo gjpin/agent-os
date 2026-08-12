@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 
 	"github.com/gjpin/agent-os/internal/execx"
 	"github.com/gjpin/agent-os/internal/profile"
@@ -191,36 +190,61 @@ func ensureLimaProfile(ctx context.Context, runner execx.Runner, out, errOut io.
 
 func limaDiskDetails(ctx context.Context, runner execx.Runner, diskID string, errOut io.Writer) (bool, int, error) {
 	var output bytes.Buffer
-	err := command(runner, ctx, "limactl", []string{"disk", "list", "--format", "{{.Name}} {{.Size}}"}, nil, &output, errOut)
+	err := command(runner, ctx, "limactl", []string{"disk", "list", "--json"}, nil, &output, errOut)
 	if err != nil {
 		return false, 0, fmt.Errorf("inspect Lima profile disk: %w", err)
 	}
-	for _, line := range strings.Split(output.String(), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 0 || fields[0] != diskID {
+	disks, err := decodeLimaDisks(output.Bytes())
+	if err != nil {
+		return false, 0, fmt.Errorf("decode Lima profile disk list: %w", err)
+	}
+	for _, disk := range disks {
+		if disk.Name != diskID {
 			continue
 		}
-		if len(fields) == 1 {
-			return true, 0, nil
-		}
-		return true, parseGiB(fields[1]), nil
+		return true, limaDiskSizeGiB(disk.Size), nil
 	}
 	return false, 0, nil
 }
 
-func parseGiB(value string) int {
-	value = strings.TrimSpace(strings.ToLower(value))
-	for _, suffix := range []string{"gib", "gi", "g"} {
-		if strings.HasSuffix(value, suffix) {
-			value = strings.TrimSpace(strings.TrimSuffix(value, suffix))
-			break
-		}
+type limaDisk struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+}
+
+func decodeLimaDisks(data []byte) ([]limaDisk, error) {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 {
+		return nil, nil
 	}
-	parsed, err := strconv.ParseFloat(value, 64)
-	if err != nil || parsed < 0 {
+	if data[0] == '[' {
+		var disks []limaDisk
+		if err := json.Unmarshal(data, &disks); err != nil {
+			return nil, err
+		}
+		return disks, nil
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	var disks []limaDisk
+	for {
+		var disk limaDisk
+		err := decoder.Decode(&disk)
+		if errors.Is(err, io.EOF) {
+			return disks, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		disks = append(disks, disk)
+	}
+}
+
+func limaDiskSizeGiB(size int64) int {
+	if size <= 0 {
 		return 0
 	}
-	return int(math.Ceil(parsed))
+	return int(math.Ceil(float64(size) / float64(1<<30)))
 }
 
 func purgeProfileMetadata(spec Spec) error {

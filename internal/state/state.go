@@ -166,14 +166,14 @@ func (s Store) Save(value State) error {
 }
 
 func (s Store) Delete(name string) error {
-	path, err := s.Path(name)
+	dir, err := s.VMDir(name)
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
+	// Provider artifacts live beside state.json and can contain large disk
+	// images or boot media. A destroyed VM must not leave those artifacts or
+	// the per-VM lock directory behind.
+	return os.RemoveAll(filepath.Clean(dir))
 }
 
 // WithLock serializes reconciliation for one VM. The lock is a separate file

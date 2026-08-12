@@ -21,8 +21,8 @@ make meson mold ninja-build nmap-ncat
 nodejs24 nodejs24-bin nodejs24-npm nodejs24-npm-bin
 openssh-clients openssl patch pkgconf-pkg-config procps-ng
 python3 python3-devel python3-pytest-xdist ripgrep rsync rust
-rust-analyzer rustfmt scons sed ShellCheck shfmt sqlite strace tar time
-tree tree-sitter-cli unzip util-linux uv wget which xxd xz yq zip zstd
+rust-analyzer rustfmt python3-scons sed ShellCheck shfmt sqlite strace tar time
+tree tree-sitter-cli unzip util-linux uv wget2-wget which xxd xz yq zip zstd
 pnpm vim-enhanced
 podman podman-docker buildah skopeo
 dnf-plugins-core rpm-build rpmdevtools redhat-rpm-config
@@ -135,6 +135,27 @@ func TestProfileSetupScriptRoutesCrossAgentState(t *testing.T) {
 	}
 }
 
+func TestLimaProfileSetupMountsAttachedDiskInPlainMode(t *testing.T) {
+	script := ProfileSetupScript(ProfileMountSpec{
+		Backend: "lima",
+		DiskID:  "agent-os-profile-profile-vm-1234567890abcdef",
+		Label:   "lima-agent-os-profile-profile-vm-1234567890abcdef",
+	})
+	for _, expected := range []string{
+		"readonly profile_device=/dev/vdb",
+		"mkfs.ext4 -F -L \"$expected_label\" \"$profile_device\"",
+		"blkid -o value -s LABEL \"$profile_device\"",
+		"mount -t ext4 -o nodev,nosuid \"$profile_device\" \"$profile_source\"",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Errorf("Lima profile setup script omits %q", expected)
+		}
+	}
+	if strings.Contains(script, "LABEL \"$profile_source\"") {
+		t.Fatal("Lima profile setup validates the filesystem label using the mount path")
+	}
+}
+
 func TestAgentInstructionsScriptIsIdempotentAndReplacesDestinations(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "home", "agent")
 	if err := os.MkdirAll(home, 0o755); err != nil {
@@ -219,19 +240,20 @@ func TestCodingAgentsScriptContainsRequiredInstallersAndSafetyControls(t *testin
 	}
 	for _, expected := range []string{
 		"set -euo pipefail",
-		"dnf install -y -- dnf-plugins-core",
+		"dnf install -y dnf-plugins-core",
 		"dnf config-manager addrepo --from-repofile=https://rpm.releases.hashicorp.com/fedora/hashicorp.repo",
-		"dnf install -y -- terraform",
-		"dnf install -y -- adoptium-temurin-java-repository",
-		"dnf config-manager setopt adoptium.enabled=1",
-		"dnf install -y -- temurin-25-jdk",
+		"dnf install -y terraform",
+		"dnf install -y adoptium-temurin-java-repository",
+		"dnf config-manager setopt adoptium-temurin-java-repository.enabled=1",
+		"dnf install -y temurin-25-jdk",
 		"for executable in node npm terraform",
 		"https://opencode.ai/install",
 		"https://chatgpt.com/codex/install.sh",
 		"https://claude.ai/install.sh",
 		"@earendil-works/pi-coding-agent",
 		"https://gh.io/copilot-install",
-		"--retry 5 --retry-delay 2 --retry-all-errors",
+		"--connect-timeout 15 --max-time 300",
+		"--retry 10 --retry-delay 5 --retry-max-time 300 --retry-all-errors",
 		"mktemp -d /tmp/agent-os-coding-agents.XXXXXX",
 		"trap cleanup EXIT",
 		"/usr/sbin/runuser --user agent -- /usr/bin/env",
@@ -253,18 +275,18 @@ func TestCodingAgentsScriptContainsRequiredInstallersAndSafetyControls(t *testin
 	if strings.Index(script, "if [ -f \"$ready_marker\" ]") > strings.Index(script, "dnf install") {
 		t.Fatal("idempotency guard runs after package installation")
 	}
-	pluginInstall := strings.Index(script, "dnf install -y -- dnf-plugins-core")
+	pluginInstall := strings.Index(script, "dnf install -y dnf-plugins-core")
 	hashicorpRepository := strings.Index(script, "dnf config-manager addrepo --from-repofile=https://rpm.releases.hashicorp.com/fedora/hashicorp.repo")
-	terraformInstall := strings.Index(script, "dnf install -y -- terraform")
-	repositoryInstall := strings.Index(script, "dnf install -y -- adoptium-temurin-java-repository")
-	repositoryEnable := strings.Index(script, "dnf config-manager setopt adoptium.enabled=1")
-	jdkInstall := strings.Index(script, "dnf install -y -- temurin-25-jdk")
+	terraformInstall := strings.Index(script, "dnf install -y terraform")
+	repositoryInstall := strings.Index(script, "dnf install -y adoptium-temurin-java-repository")
+	repositoryEnable := strings.Index(script, "dnf config-manager setopt adoptium-temurin-java-repository.enabled=1")
+	jdkInstall := strings.Index(script, "dnf install -y temurin-25-jdk")
 	nodeValidation := strings.Index(script, "for executable in node npm")
 	npmInstall := strings.Index(script, "/usr/bin/npm install")
 	if !(pluginInstall < hashicorpRepository && hashicorpRepository < terraformInstall && terraformInstall < repositoryInstall && repositoryInstall < repositoryEnable && repositoryEnable < jdkInstall && jdkInstall < nodeValidation && nodeValidation < npmInstall) {
 		t.Fatalf("provisioning commands are out of order: plugin install=%d HashiCorp repository=%d Terraform install=%d repository install=%d enable=%d JDK install=%d executable validation=%d npm install=%d", pluginInstall, hashicorpRepository, terraformInstall, repositoryInstall, repositoryEnable, jdkInstall, nodeValidation, npmInstall)
 	}
-	if strings.Contains(script, "nodejs26") || strings.Contains(script, "dnf install -y -- nodejs") {
+	if strings.Contains(script, "nodejs26") || strings.Contains(script, "dnf install -y nodejs") {
 		t.Fatal("coding-agent bootstrap installs Node instead of using the baseline")
 	}
 	javaValidation := strings.Index(script, "for executable in java javac")

@@ -113,7 +113,7 @@ func (r *guestAgentTestRunner) Run(_ context.Context, name string, args []string
 }
 
 func TestLimaUsesArgumentArrays(t *testing.T) {
-	runner := &execx.RecordingRunner{}
+	runner := &backendScriptedRunner{}
 	provider := Lima{Runner: runner}
 	if err := provider.Start(context.Background(), "agents"); err != nil {
 		t.Fatal(err)
@@ -128,8 +128,11 @@ func TestLimaUsesArgumentArrays(t *testing.T) {
 			}
 		}
 	}
-	if got := runner.Calls[1].Args; strings.Join(got, " ") != "shell agents -- sudo /usr/bin/test -f "+provision.CodingAgentsReadyPath {
+	if got := runner.Calls[1].Args; strings.Join(got, " ") != "shell agents -- sudo /bin/bash -s" {
 		t.Fatalf("unexpected readiness check: %+v", got)
+	}
+	if !strings.Contains(runner.Inputs[1], provision.ProvisioningReadyPath) || !strings.Contains(runner.Inputs[1], "agent-os-provision.service") {
+		t.Fatalf("readiness check omitted the provisioning marker or service: %q", runner.Inputs[1])
 	}
 }
 
@@ -308,7 +311,7 @@ func TestAgentUserExecutionSetsManagedEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	limaArgs := strings.Join(limaRunner.Calls[0].Args, " ")
-	for _, expected := range []string{"HOME=" + provision.AgentHome, "SHELL=/bin/bash", "PATH=" + provision.AgentManagedPath, "codex login"} {
+	for _, expected := range []string{"--workdir", provision.AgentHome, "-H", "HOME=" + provision.AgentHome, "SHELL=/bin/bash", "PATH=" + provision.AgentManagedPath, "codex login"} {
 		if !strings.Contains(limaArgs, expected) {
 			t.Errorf("Lima agent execution omits %q: %s", expected, limaArgs)
 		}
@@ -744,12 +747,12 @@ func TestDryRunProvidersIncludeAgentInstructions(t *testing.T) {
 				provision.AgentInstructionsCopilotPath,
 				"rm -rf --",
 				"ln -s --",
-				"dnf install -y -- dnf-plugins-core",
+				"dnf install -y dnf-plugins-core",
 				"dnf config-manager addrepo --from-repofile=https://rpm.releases.hashicorp.com/fedora/hashicorp.repo",
-				"dnf install -y -- terraform",
-				"dnf install -y -- adoptium-temurin-java-repository",
-				"dnf config-manager setopt adoptium.enabled=1",
-				"dnf install -y -- temurin-25-jdk",
+				"dnf install -y terraform",
+				"dnf install -y adoptium-temurin-java-repository",
+				"dnf config-manager setopt adoptium-temurin-java-repository.enabled=1",
+				"dnf install -y temurin-25-jdk",
 				"--prefix \"$agent_home/.local\" chrome-devtools-mcp@latest skills@latest",
 				"chrome-devtools chrome-devtools-mcp",
 				provision.DefaultChromeDevToolsSkillURL,

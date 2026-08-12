@@ -785,7 +785,7 @@ func (a *App) packagesCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			commandArgs := append([]string{"sudo", "dnf", "install", "-y", "--"}, packages...)
+			commandArgs := append([]string{"sudo", "dnf", "install", "-y"}, packages...)
 			return p.Exec(cmd.Context(), c.VMName, commandArgs, nil, a.Out, a.Err)
 		},
 	}

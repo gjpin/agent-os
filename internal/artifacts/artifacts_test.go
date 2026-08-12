@@ -183,7 +183,7 @@ func TestProfileArtifactsAttachSeparatePersistentDiskAndRouteState(t *testing.T)
 	}
 	for _, expected := range []string{
 		"additionalDisks:", "format: true", "fsType: ext4",
-		"/var/lib/agent-os/profile", "nodev,nosuid",
+		"/var/lib/agent-os/profile", "nodev,nosuid", "/usr/local/libexec/agent-os-profile-sync sync",
 		"/home/agent/.codex", "/home/agent/.agents", "/home/agent/.config/orca", "/home/agent/.claude.json", "cli_auth_credentials_store = \"file\"",
 	} {
 		if !strings.Contains(lima, expected) {
@@ -193,6 +193,9 @@ func TestProfileArtifactsAttachSeparatePersistentDiskAndRouteState(t *testing.T)
 	cloudInit := CloudInit(def, "")
 	if !strings.Contains(cloudInit, "agent-os-profile-"+"profile-vm") || !strings.Contains(cloudInit, "UUID=$profile_uuid") {
 		t.Fatal("cloud-init did not contain the libvirt profile setup")
+	}
+	if !strings.Contains(cloudInit, "[bash, /usr/local/libexec/agent-os-profile-sync, sync]") {
+		t.Fatal("cloud-init did not flush the initial Claude configuration to the profile")
 	}
 	if !strings.Contains(cloudInit, "agent-os-profile-restore.service") || !strings.Contains(cloudInit, "agent-os-profile-sync restore") {
 		t.Fatal("cloud-init did not include the profile restore unit")
@@ -378,6 +381,7 @@ func TestFirewallRulesAreNftScriptCommands(t *testing.T) {
 	joined := strings.Join(rules, "\n")
 	for _, expected := range []string{
 		"add chain inet agent_os input",
+		"add rule inet agent_os input iifname != \"lo\" tcp dport 22 accept",
 		"add rule inet agent_os input iifname != \"lo\" tcp dport 6768 accept",
 		"add rule inet agent_os output oifname != \"lo\" ip daddr 10.20.0.0/16 accept",
 	} {
@@ -439,7 +443,7 @@ func TestAgentInstructionsAreIncludedInProviderArtifacts(t *testing.T) {
 }
 
 func TestKindAndCodingAgentsInstallersAreOrderedBeforeOrcaForEveryProvider(t *testing.T) {
-	def := VMDefinition{Name: "agents", CPUs: 2, MemoryMiB: 4096, DiskGiB: 120, Architecture: "x86_64", Packages: []string{"htop", "git"}}
+	def := VMDefinition{Name: "agents", CPUs: 2, MemoryMiB: 4096, DiskGiB: 120, Architecture: "x86_64", OrcaPort: 6768, Packages: []string{"htop", "git"}}
 	cloudInit := CloudInit(def, "")
 	lima, err := LimaYAML(def)
 	if err != nil {
@@ -482,19 +486,19 @@ func TestKindAndCodingAgentsInstallersAreOrderedBeforeOrcaForEveryProvider(t *te
 			t.Errorf("%s does not embed the kind Podman setup exactly once", name)
 		}
 		for _, command := range []string{
-			"dnf install -y -- dnf-plugins-core",
+			"dnf install -y dnf-plugins-core",
 			"dnf config-manager addrepo --from-repofile=https://rpm.releases.hashicorp.com/fedora/hashicorp.repo",
-			"dnf install -y -- terraform",
-			"dnf install -y -- adoptium-temurin-java-repository",
-			"dnf config-manager setopt adoptium.enabled=1",
-			"dnf install -y -- temurin-25-jdk",
+			"dnf install -y terraform",
+			"dnf install -y adoptium-temurin-java-repository",
+			"dnf config-manager setopt adoptium-temurin-java-repository.enabled=1",
+			"dnf install -y temurin-25-jdk",
 		} {
 			if !strings.Contains(artifact, command) {
 				t.Errorf("%s artifact omits Temurin provisioning command %q", name, command)
 			}
 		}
 		instructions := strings.Index(artifact, "agent-os-provision-agent-instructions")
-		packageInstall := strings.Index(artifact, "dnf install -y -- ")
+		packageInstall := strings.Index(artifact, "dnf install -y ")
 		kindSetup := strings.Index(artifact, "agent-os-setup-kind-podman")
 		agents := strings.Index(artifact, "agent-os-install-coding-agents")
 		orca := strings.Index(artifact, "agent-os-install-orca\n")
@@ -513,6 +517,11 @@ func TestKindAndCodingAgentsInstallersAreOrderedBeforeOrcaForEveryProvider(t *te
 		} {
 			if !strings.Contains(artifact, command) {
 				t.Errorf("%s artifact omits Orca skills command %q", name, command)
+			}
+		}
+		for _, expected := range []string{"agent-os-wait-for-orca", "systemctl restart orca.service", "Orca did not listen on configured TCP port 6768"} {
+			if !strings.Contains(artifact, expected) {
+				t.Errorf("%s artifact omits Orca readiness check %q", name, expected)
 			}
 		}
 		for _, endpoint := range []string{

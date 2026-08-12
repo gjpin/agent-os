@@ -48,6 +48,10 @@ if [ "$actual" != "$expected" ]; then
   exit 1
 fi
 /usr/bin/dnf install -y "$tmp"
+/usr/bin/test -x /usr/bin/orca-ide
+if [ ! -e /usr/bin/orca ] && [ ! -L /usr/bin/orca ]; then
+  /usr/bin/ln -s /usr/bin/orca-ide /usr/bin/orca
+fi
 /usr/bin/test -x /usr/bin/orca
 `, packageInfo.URL, packageInfo.SHA256), nil
 }

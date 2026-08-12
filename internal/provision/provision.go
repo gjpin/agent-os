@@ -17,6 +17,7 @@ const (
 	AgentInstructionsPiPath        = "/home/agent/.pi/agent/AGENTS.md"
 	AgentInstructionsCopilotPath   = "/home/agent/.copilot/copilot-instructions.md"
 	CodingAgentsReadyPath          = "/var/lib/agent-os/coding-agents-ready"
+	ProvisioningReadyPath          = "/var/lib/agent-os/provision-ready"
 	OrcaSkillsReadyPath            = "/var/lib/agent-os/orca-skills-ready"
 	AgentHome                      = "/home/agent"
 	AgentManagedPath               = "/home/agent/.local/bin:/home/agent/.opencode/bin:/usr/local/bin:/usr/bin:/bin"
@@ -96,7 +97,9 @@ set -euo pipefail
 readonly agent_home=/home/agent
 readonly managed_path=/home/agent/.local/bin:/home/agent/.opencode/bin:/usr/local/bin:/usr/bin:/bin
 
-install -d -o agent -g agent -m 0755 "$agent_home/.local/bin" "$agent_home/.agents/skills"
+cd "$agent_home"
+
+install -d -o agent -g agent -m 0755 "$agent_home/.local" "$agent_home/.local/bin" "$agent_home/.agents/skills"
 
 run_as_agent() {
   /usr/sbin/runuser --user agent -- /usr/bin/env \
@@ -204,8 +207,8 @@ make meson mold ninja-build nmap-ncat
 nodejs24 nodejs24-bin nodejs24-npm nodejs24-npm-bin
 openssh-clients openssl patch pkgconf-pkg-config procps-ng
 python3 python3-devel python3-pytest-xdist ripgrep rsync rust
-rust-analyzer rustfmt scons sed ShellCheck shfmt sqlite strace tar time
-tree tree-sitter-cli unzip util-linux uv wget which xxd xz yq zip zstd
+rust-analyzer rustfmt python3-scons sed ShellCheck shfmt sqlite strace tar time
+tree tree-sitter-cli unzip util-linux uv wget2-wget which xxd xz yq zip zstd
 pnpm vim-enhanced
 podman podman-docker buildah skopeo
 dnf-plugins-core rpm-build rpmdevtools redhat-rpm-config
@@ -272,23 +275,25 @@ readonly managed_path=/home/agent/.local/bin:/home/agent/.opencode/bin:/usr/loca
 readonly codex_home=/home/agent/.codex
 readonly copilot_home=/home/agent/.copilot
 
+cd "$agent_home"
+
 if [ -f "$ready_marker" ]; then
   exit 0
 fi
 
-dnf install -y -- dnf-plugins-core
+dnf install -y dnf-plugins-core
 dnf config-manager addrepo --from-repofile=https://rpm.releases.hashicorp.com/fedora/hashicorp.repo
-dnf install -y -- terraform
+dnf install -y terraform
 
-dnf install -y -- adoptium-temurin-java-repository
-dnf config-manager setopt adoptium.enabled=1
-dnf install -y -- temurin-25-jdk
+dnf install -y adoptium-temurin-java-repository
+dnf config-manager setopt adoptium-temurin-java-repository.enabled=1
+dnf install -y temurin-25-jdk
 
 for executable in node npm terraform; do
   resolved=$(command -v "$executable")
   test -x "$resolved"
 done
-install -d -o agent -g agent -m 0755 "$agent_home/.local/bin" "$agent_home/.opencode/bin" "$agent_home/.agents/skills"
+install -d -o agent -g agent -m 0755 "$agent_home/.local" "$agent_home/.local/bin" "$agent_home/.opencode/bin" "$agent_home/.agents/skills"
 
 installer_dir=$(mktemp -d /tmp/agent-os-coding-agents.XXXXXX)
 cleanup() {
@@ -300,9 +305,10 @@ chmod 0755 "$installer_dir"
 download_installer() {
   local url=$1
   local destination=$2
-  curl --fail --silent --show-error --location \
-    --retry 5 --retry-delay 2 --retry-all-errors \
-    --output "$destination" "$url"
+	curl --fail --silent --show-error --location \
+	  --connect-timeout 15 --max-time 300 \
+	  --retry 10 --retry-delay 5 --retry-max-time 300 --retry-all-errors \
+	  --output "$destination" "$url"
   chmod 0644 "$destination"
 }
 
@@ -456,10 +462,25 @@ func ProfileSetupScript(spec ProfileMountSpec) string {
 	fmt.Fprintf(&b, "readonly expected_label=%s\n", shellQuote(spec.Label))
 	if spec.Backend == "lima" {
 		fmt.Fprintf(&b, "readonly profile_source=%s\n", shellQuote("/mnt/lima-"+spec.DiskID))
+		b.WriteString(`readonly profile_device=/dev/vdb
+if ! mountpoint -q "$profile_source"; then
+  test -b "$profile_device"
+  filesystem=$(blkid -o value -s TYPE "$profile_device" 2>/dev/null || true)
+  if [ -z "$filesystem" ]; then
+    test -z "$(wipefs -n "$profile_device" 2>/dev/null || true)"
+    mkfs.ext4 -F -L "$expected_label" "$profile_device"
+    filesystem=ext4
+  fi
+  test "$filesystem" = ext4
+  test "$(blkid -o value -s LABEL "$profile_device")" = "$expected_label"
+  install -d -o root -g root -m 0755 "$profile_source"
+  mount -t ext4 -o nodev,nosuid "$profile_device" "$profile_source"
+fi
+`)
 		b.WriteString(`test -d "$profile_source"
 mountpoint -q "$profile_source"
 test "$(findmnt -no FSTYPE --target "$profile_source")" = ext4
-test "$(blkid -o value -s LABEL "$profile_source")" = "$expected_label"
+test "$(blkid -o value -s LABEL "$profile_device")" = "$expected_label"
 mount -o remount,nodev,nosuid "$profile_source"
 resize2fs "$(findmnt -no SOURCE --target "$profile_source")"
 if ! mountpoint -q "$profile_mount"; then
@@ -716,7 +737,7 @@ func RequiredExecutables(packages []string) []string {
 }
 
 func InstallCommand(packages []string) []string {
-	result := []string{"dnf", "install", "-y", "--"}
+	result := []string{"dnf", "install", "-y"}
 	result = append(result, packages...)
 	return result
 }
