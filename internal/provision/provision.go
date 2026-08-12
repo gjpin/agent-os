@@ -253,7 +253,7 @@ func mergePackageSets(sets ...[]string) []string {
 	return result
 }
 
-// CodingAgentsScript returns the root-run, idempotent installer for the five
+// CodingAgentsScript returns the root-run, idempotent installer for the six
 // coding agents included in every VM. Upstream installers intentionally select
 // their latest release at first boot; the marker prevents a later provisioning
 // replay from unexpectedly upgrading an existing VM.
@@ -318,6 +318,9 @@ run_as_agent() {
     CODEX_HOME="$codex_home" COPILOT_HOME="$copilot_home" "$@"
 }
 
+download_installer https://cursor.com/install "$installer_dir/cursor.sh"
+run_as_agent /bin/bash "$installer_dir/cursor.sh"
+
 download_installer https://opencode.ai/install "$installer_dir/opencode.sh"
 run_as_agent /bin/bash "$installer_dir/opencode.sh" --no-modify-path
 
@@ -342,7 +345,7 @@ for executable in java javac; do
   test -x "$resolved"
 done
 
-for executable in opencode codex claude pi copilot; do
+for executable in agent opencode codex claude pi copilot; do
   run_as_agent /bin/sh -c 'resolved=$(command -v "$1") && test -x "$resolved"' sh "$executable"
 done
 

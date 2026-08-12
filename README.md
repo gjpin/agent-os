@@ -24,8 +24,8 @@ The project is intentionally conservative about trust boundaries:
 - `internal/instructions/AGENTS.md` is embedded in the release binary and
   provisioned as `/home/agent/.agent-os/AGENTS.md`, with agent-specific
   instruction paths linked to that canonical file;
-- OpenCode, Codex CLI, Claude Code, Pi, and GitHub Copilot CLI are preinstalled
-  for the unprivileged `agent` user;
+- Cursor CLI (`agent`), OpenCode, Codex CLI, Claude Code, Pi, and GitHub Copilot
+  CLI are preinstalled for the unprivileged `agent` user;
 - Orca's `orca-cli` and `orchestration` skills are installed in the shared
   `/home/agent/.agents/skills` directory during first boot;
 - Chrome DevTools MCP, its `chrome-devtools` CLI, and configured GitHub skills
@@ -54,10 +54,13 @@ go run . completion zsh > ~/.zfunc/_agent-os
 `setup-host --apply --yes`; on macOS it will not run a Homebrew installer
 implicitly. On Arch Linux, setup installs the required QEMU/libvirt tooling and
 enables `libvirtd.service`. `destroy` and `upgrade` also require `--yes` or an
-interactive confirmation. The first `start` can take up to 30 minutes while
-DNF installs the baseline, the five coding agents, and the shared Orca skills.
-Existing VMs must be destroyed and recreated to receive the complete baseline;
-`upgrade` does not retrofit or refresh first-boot tools. If
+interactive confirmation. `auth codex` performs login inside the VM and never
+copies a host authentication database. The first `start` can take up to 30
+minutes while DNF installs the baseline, the six coding agents, and the shared
+Orca skills, resolving the agents' latest versions from their official
+upstream installers. Existing VMs must be destroyed and recreated to receive
+the complete baseline; `upgrade` does not retrofit or refresh first-boot tools.
+If
 `internal/instructions/AGENTS.md` changes, rebuild the `agent-os` binary before
 creating new VMs.
 

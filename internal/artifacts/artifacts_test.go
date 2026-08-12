@@ -525,6 +525,7 @@ func TestKindAndCodingAgentsInstallersAreOrderedBeforeOrcaForEveryProvider(t *te
 			}
 		}
 		for _, endpoint := range []string{
+			"https://cursor.com/install",
 			"https://opencode.ai/install",
 			"https://chatgpt.com/codex/install.sh",
 			"https://claude.ai/install.sh",
