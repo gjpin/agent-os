@@ -216,43 +216,75 @@ func LimaYAML(def VMDefinition) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("generate guest firewall: %w", err)
 	}
-	b.WriteString("mounts: []\nssh:\n  loadDotSSHPubKeys: false\n  forwardAgent: false\n\nprovision:\n  - mode: system\n    script: |")
-	b.WriteString("\n      set -eu\n      useradd --create-home --shell /bin/bash agent || true\n")
-	b.WriteString("      usermod --lock agent || true\n")
+	var provisioning strings.Builder
+	provisioning.WriteString("#!/bin/bash\nset -eu\nuseradd --create-home --shell /bin/bash agent || true\n")
+	provisioning.WriteString("usermod --lock agent || true\n")
 	if def.ProfileDiskID != "" {
-		b.WriteString("      install -d -m 0755 /usr/local/libexec\n      cat > /usr/local/libexec/agent-os-profile-sync <<'AGENT_OS_PROFILE_SYNC'\n")
-		appendIndented(&b, provision.ProfileSyncScript(), "      ")
-		b.WriteString("      AGENT_OS_PROFILE_SYNC\n      chmod 0700 /usr/local/libexec/agent-os-profile-sync\n      cat > /usr/local/libexec/agent-os-profile-setup <<'AGENT_OS_PROFILE_SETUP'\n")
-		appendIndented(&b, provision.ProfileSetupScript(provision.ProfileMountSpec{Backend: "lima", DiskID: def.ProfileDiskID, Label: def.ProfileDiskLabel}), "      ")
-		b.WriteString("      AGENT_OS_PROFILE_SETUP\n      chmod 0700 /usr/local/libexec/agent-os-profile-setup\n      /bin/bash /usr/local/libexec/agent-os-profile-setup\n")
+		provisioning.WriteString("install -d -m 0755 /usr/local/libexec\ncat > /usr/local/libexec/agent-os-profile-sync <<'AGENT_OS_PROFILE_SYNC'\n")
+		appendIndented(&provisioning, provision.ProfileSyncScript(), "")
+		provisioning.WriteString("AGENT_OS_PROFILE_SYNC\nchmod 0700 /usr/local/libexec/agent-os-profile-sync\ncat > /usr/local/libexec/agent-os-profile-setup <<'AGENT_OS_PROFILE_SETUP'\n")
+		appendIndented(&provisioning, provision.ProfileSetupScript(provision.ProfileMountSpec{Backend: "lima", DiskID: def.ProfileDiskID, Label: def.ProfileDiskLabel}), "")
+		provisioning.WriteString("AGENT_OS_PROFILE_SETUP\nchmod 0700 /usr/local/libexec/agent-os-profile-setup\n/bin/bash /usr/local/libexec/agent-os-profile-setup\n")
 	}
-	b.WriteString("      systemctl disable --now containerd.service 2>/dev/null || true\n")
+	provisioning.WriteString("systemctl disable --now containerd.service 2>/dev/null || true\n")
 	if repositoryKeyScript != "" {
-		appendIndented(&b, repositoryKeyScript, "      ")
+		appendIndented(&provisioning, repositoryKeyScript, "")
 	}
 	agentInstructionsDelimiter := heredocDelimiter("AGENT_OS_AGENT_INSTRUCTIONS", agentInstructionsScript)
-	fmt.Fprintf(&b, "      cat > /run/agent-os-provision-agent-instructions <<'%s'\n", agentInstructionsDelimiter)
-	appendIndented(&b, agentInstructionsScript, "      ")
-	fmt.Fprintf(&b, "      %s\n      /bin/bash /run/agent-os-provision-agent-instructions\n", agentInstructionsDelimiter)
-	fmt.Fprintf(&b, "      %s\n", strings.Join(provision.InstallCommand(packages), " "))
-	b.WriteString("      cat > /run/agent-os-setup-kind-podman <<'AGENT_OS_KIND_PODMAN'\n")
-	appendIndented(&b, kindPodmanScript, "      ")
-	b.WriteString("      AGENT_OS_KIND_PODMAN\n      /bin/bash /run/agent-os-setup-kind-podman\n")
-	b.WriteString("      cat > /run/agent-os-install-coding-agents <<'AGENT_OS_CODING_AGENTS'\n")
-	appendIndented(&b, codingAgentsScript, "      ")
-	b.WriteString("      AGENT_OS_CODING_AGENTS\n      /bin/bash /run/agent-os-install-coding-agents\n")
-	b.WriteString("      cat > /run/agent-os-install-orca <<'AGENT_OS_ORCA_INSTALL'\n")
-	appendIndented(&b, orcaInstallScript, "      ")
-	b.WriteString("      AGENT_OS_ORCA_INSTALL\n      /bin/bash /run/agent-os-install-orca\n")
-	b.WriteString("      install -d -m 0755 /etc/agent-os\n      cat > /etc/systemd/system/orca.service <<'AGENT_OS_ORCA_UNIT'\n")
-	appendIndented(&b, OrcaSystemdUnit(def.OrcaPort, def.BindAddress, def.PairingAddress), "      ")
-	b.WriteString("      AGENT_OS_ORCA_UNIT\n")
-	b.WriteString("      cat > /etc/agent-os/firewall.rules <<'AGENT_OS_FIREWALL'\n")
-	appendIndented(&b, strings.Join(firewallRules, "\n"), "      ")
-	b.WriteString("      AGENT_OS_FIREWALL\n      cat > /etc/systemd/system/agent-os-firewall.service <<'AGENT_OS_FIREWALL_UNIT'\n")
-	appendIndented(&b, FirewallSystemdUnit(), "      ")
-	b.WriteString("      AGENT_OS_FIREWALL_UNIT\n      systemctl daemon-reload\n      systemctl enable --now agent-os-firewall.service\n      systemctl enable --now orca.service\n")
+	fmt.Fprintf(&provisioning, "cat > /run/agent-os-provision-agent-instructions <<'%s'\n", agentInstructionsDelimiter)
+	appendIndented(&provisioning, agentInstructionsScript, "")
+	fmt.Fprintf(&provisioning, "%s\n/bin/bash /run/agent-os-provision-agent-instructions\n", agentInstructionsDelimiter)
+	fmt.Fprintf(&provisioning, "%s\n", strings.Join(provision.InstallCommand(packages), " "))
+	provisioning.WriteString("cat > /run/agent-os-setup-kind-podman <<'AGENT_OS_KIND_PODMAN'\n")
+	appendIndented(&provisioning, kindPodmanScript, "")
+	provisioning.WriteString("AGENT_OS_KIND_PODMAN\n/bin/bash /run/agent-os-setup-kind-podman\n")
+	provisioning.WriteString("cat > /run/agent-os-install-coding-agents <<'AGENT_OS_CODING_AGENTS'\n")
+	appendIndented(&provisioning, codingAgentsScript, "")
+	provisioning.WriteString("AGENT_OS_CODING_AGENTS\n/bin/bash /run/agent-os-install-coding-agents\n")
+	if def.ProfileDiskID != "" {
+		provisioning.WriteString("/usr/local/libexec/agent-os-profile-sync sync\n")
+	}
+	provisioning.WriteString("cat > /run/agent-os-install-orca <<'AGENT_OS_ORCA_INSTALL'\n")
+	appendIndented(&provisioning, orcaInstallScript, "")
+	provisioning.WriteString("AGENT_OS_ORCA_INSTALL\n/bin/bash /run/agent-os-install-orca\n")
+	provisioning.WriteString("install -d -m 0755 /etc/agent-os\ncat > /etc/systemd/system/orca.service <<'AGENT_OS_ORCA_UNIT'\n")
+	appendIndented(&provisioning, OrcaSystemdUnit(def.OrcaPort, def.BindAddress, def.PairingAddress), "")
+	provisioning.WriteString("AGENT_OS_ORCA_UNIT\n")
+	provisioning.WriteString("cat > /etc/agent-os/firewall.rules <<'AGENT_OS_FIREWALL'\n")
+	appendIndented(&provisioning, strings.Join(firewallRules, "\n"), "")
+	provisioning.WriteString("AGENT_OS_FIREWALL\ncat > /etc/systemd/system/agent-os-firewall.service <<'AGENT_OS_FIREWALL_UNIT'\n")
+	appendIndented(&provisioning, FirewallSystemdUnit(), "")
+	provisioning.WriteString("AGENT_OS_FIREWALL_UNIT\nsystemctl daemon-reload\nsystemctl enable --now agent-os-firewall.service\nsystemctl enable --now orca.service\n")
+	if def.OrcaPort != 0 {
+		provisioning.WriteString("cat > /usr/local/libexec/agent-os-wait-for-orca <<'AGENT_OS_WAIT_FOR_ORCA'\n")
+		appendIndented(&provisioning, orcaReadinessScript(def.OrcaPort), "")
+		provisioning.WriteString("AGENT_OS_WAIT_FOR_ORCA\nchmod 0700 /usr/local/libexec/agent-os-wait-for-orca\n/bin/bash /usr/local/libexec/agent-os-wait-for-orca\n")
+	}
+	fmt.Fprintf(&provisioning, "install -d -m 0755 /var/lib/agent-os\ntouch %s\nchmod 0644 %s\n", provision.ProvisioningReadyPath, provision.ProvisioningReadyPath)
+
+	b.WriteString("mounts: []\nssh:\n  loadDotSSHPubKeys: false\n  forwardAgent: false\n\nprovision:\n  - mode: system\n    script: |\n      install -d -m 0755 /usr/local/libexec\n      cat > /usr/local/libexec/agent-os-provision <<'AGENT_OS_PROVISION'\n")
+	appendIndented(&b, provisioning.String(), "      ")
+	b.WriteString("      AGENT_OS_PROVISION\n      chmod 0700 /usr/local/libexec/agent-os-provision\n      cat > /etc/systemd/system/agent-os-provision.service <<'AGENT_OS_PROVISION_UNIT'\n")
+	appendIndented(&b, limaProvisioningUnit(), "      ")
+	b.WriteString("      AGENT_OS_PROVISION_UNIT\n      systemctl daemon-reload\n      systemctl enable agent-os-provision.service\n      systemctl start --no-block agent-os-provision.service\n")
 	return b.String(), nil
+}
+
+func limaProvisioningUnit() string {
+	return `[Unit]
+Description=agent-os guest provisioning
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /usr/local/libexec/agent-os-provision
+TimeoutStartSec=infinity
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+`
 }
 
 func CloudInit(def VMDefinition, repositoryKeyPath string) string {
@@ -342,6 +374,10 @@ func cloudInit(def VMDefinition, repositoryKeyPath string) (string, error) {
 	appendIndented(&b, orcaInstallScript, "      ")
 	b.WriteString("  - path: /etc/systemd/system/agent-os-firewall.service\n    permissions: '0644'\n    content: |\n")
 	appendIndented(&b, FirewallSystemdUnit(), "      ")
+	if def.OrcaPort != 0 {
+		b.WriteString("  - path: /usr/local/libexec/agent-os-wait-for-orca\n    permissions: '0700'\n    content: |\n")
+		appendIndented(&b, orcaReadinessScript(def.OrcaPort), "      ")
+	}
 	b.WriteString("runcmd:\n")
 	if def.ProfileDiskID != "" {
 		b.WriteString("  - [bash, /usr/local/libexec/agent-os-profile-setup]\n")
@@ -349,11 +385,17 @@ func cloudInit(def VMDefinition, repositoryKeyPath string) (string, error) {
 	b.WriteString("  - [bash, /usr/local/libexec/agent-os-provision-agent-instructions]\n")
 	b.WriteString("  - [bash, /usr/local/libexec/agent-os-setup-kind-podman]\n")
 	b.WriteString("  - [bash, /usr/local/libexec/agent-os-install-coding-agents]\n")
+	if def.ProfileDiskID != "" {
+		b.WriteString("  - [bash, /usr/local/libexec/agent-os-profile-sync, sync]\n")
+	}
 	b.WriteString("  - [bash, /usr/local/libexec/agent-os-install-orca]\n")
 	b.WriteString("  - [systemctl, daemon-reload]\n")
 	b.WriteString("  - [systemctl, enable, --now, agent-os-firewall.service]\n")
 	b.WriteString("  - [systemctl, enable, --now, qemu-guest-agent.service]\n")
 	b.WriteString("  - [systemctl, enable, --now, orca.service]\n")
+	if def.OrcaPort != 0 {
+		b.WriteString("  - [bash, /usr/local/libexec/agent-os-wait-for-orca]\n")
+	}
 	return b.String(), nil
 }
 
@@ -438,6 +480,7 @@ Type=simple
 User=agent
 Group=agent
 ExecStart=/usr/bin/orca serve --port %d --pairing-address %s
+Environment=HOME=/home/agent
 Environment=ORCA_MODE=headless
 Environment=ORCA_PORT=%d
 Environment=ORCA_BIND_ADDRESS=%s
@@ -446,12 +489,47 @@ RestartSec=3
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/home/agent
+ProtectHome=false
+ReadWritePaths=/home/agent /var/lib/agent-os/profile
 
 [Install]
 WantedBy=multi-user.target
 `, port, pairing, port, bindAddress)
+}
+
+func orcaReadinessScript(port int) string {
+	return fmt.Sprintf(`#!/bin/bash
+set -euo pipefail
+
+wait_for_configured_port() {
+  for _ in $(seq 1 60); do
+    if ss -H -ltn | awk -v port=":%d" '$4 ~ (port "$") { found=1 } END { exit !found }'; then
+      return 0
+    fi
+    if ! systemctl is-active --quiet orca.service; then
+      return 1
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+if wait_for_configured_port; then
+  exit 0
+fi
+
+# Orca can fall back to an OS-assigned port when a stale process wins the
+# initial bind race. Restart once so the configured endpoint is authoritative.
+systemctl restart orca.service
+if wait_for_configured_port; then
+  exit 0
+fi
+
+echo "Orca did not listen on configured TCP port %d" >&2
+systemctl status --no-pager orca.service >&2 || true
+ss -H -ltn >&2 || true
+exit 1
+`, port, port)
 }
 
 func LibvirtNetworkXML(definitions ...VMDefinition) string {
@@ -560,6 +638,7 @@ func firewallRules(allowedCIDRs []string, orcaPort []int, rejectInvalidCIDR bool
 		"add rule inet agent_os input ct state established,related accept",
 		"add rule inet agent_os input iifname \"lo\" accept",
 		"add rule inet agent_os input iifname != \"lo\" udp sport 67 udp dport 68 accept",
+		"add rule inet agent_os input iifname != \"lo\" tcp dport 22 accept",
 	}
 	if port != 0 {
 		rules = append(rules, fmt.Sprintf("add rule inet agent_os input iifname != \"lo\" tcp dport %d accept", port))

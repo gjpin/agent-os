@@ -59,6 +59,39 @@ does not retrofit or refresh first-boot tools. If
 `internal/instructions/AGENTS.md` changes, rebuild the `agent-os` binary before
 creating new VMs.
 
+### Real VM E2E tests
+
+The real-VM suite is local-only and opt-in. It builds the current binary,
+creates a uniquely named Fedora VM with temporary configuration/state and an
+ephemeral repository key, checks the complete guest installation, exercises a
+restart, and destroys the VM with its retained profile disk:
+
+```sh
+make e2e
+```
+
+Apple Silicon macOS requires `limactl` and Virtualization.framework. Supported
+Linux hosts are Fedora, Ubuntu, and x86_64 Arch Linux with libvirt, QEMU,
+`cloud-localds`, and `nft`; use `agent-os setup-host` to review prerequisites
+and `agent-os setup-host --apply --yes` to apply supported Linux host changes.
+The test needs network access to download the pinned Fedora image, Orca, and
+the latest guest coding-agent installers. The first boot can take up to 30
+minutes and needs several GiB of free disk space.
+
+To retain the stopped VM and its temporary state for inspection, run:
+
+```sh
+AGENT_OS_E2E_KEEP_VM=1 make e2e
+```
+
+The test prints inspection and cleanup commands. If cleanup fails, it retains
+the temporary state directory and reports the failed lifecycle operation.
+The compile-only check does not create a VM:
+
+```sh
+go test -tags=e2e ./e2e -run '^$'
+```
+
 The top-level `skills` configuration list accepts public GitHub tree URLs. The
 built-in Chrome DevTools CLI skill is always included; configured entries are
 additive. `agent-os skills install [name]` applies package and skill updates to

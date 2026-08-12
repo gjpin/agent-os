@@ -66,7 +66,7 @@ func (l Lima) Create(ctx context.Context, spec Spec) error {
 		return err
 	}
 	profile := filepath.Join(artifactDir, "lima.yaml")
-	image, err := releases.FedoraServer44(spec.Architecture)
+	image, err := releases.FedoraCloudBase44(spec.Architecture)
 	if err != nil {
 		return err
 	}
@@ -97,7 +97,7 @@ func (l Lima) Create(ctx context.Context, spec Spec) error {
 func (l Lima) Start(ctx context.Context, name string) error {
 	readyCtx, cancel := context.WithTimeout(ctx, provisioningTimeout)
 	defer cancel()
-	if err := command(l.Runner, readyCtx, "limactl", []string{"start", name}, nil, l.Out, l.Err); err != nil {
+	if err := command(l.Runner, readyCtx, "limactl", []string{"start", "--timeout", provisioningTimeout.String(), name}, nil, l.Out, l.Err); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -106,16 +106,29 @@ func (l Lima) Start(ctx context.Context, name string) error {
 		}
 		return fmt.Errorf("required Lima provisioning failed: %w", err)
 	}
-	if err := command(l.Runner, readyCtx, "limactl", []string{"shell", name, "--", "sudo", "/usr/bin/test", "-f", provision.CodingAgentsReadyPath}, nil, io.Discard, l.Err); err != nil {
+	if err := command(l.Runner, readyCtx, "limactl", []string{"shell", name, "--", "sudo", "/bin/bash", "-s"}, strings.NewReader(limaProvisioningWaitScript()), io.Discard, l.Err); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if errors.Is(readyCtx.Err(), context.DeadlineExceeded) {
 			return fmt.Errorf("timed out after %s waiting for required VM provisioning: %w", provisioningTimeout, context.DeadlineExceeded)
 		}
-		return fmt.Errorf("coding-agent readiness marker %s is missing: %w", provision.CodingAgentsReadyPath, err)
+		return fmt.Errorf("provisioning readiness marker %s is missing: %w", provision.ProvisioningReadyPath, err)
 	}
 	return nil
+}
+
+func limaProvisioningWaitScript() string {
+	return `#!/bin/bash
+set -euo pipefail
+while ! test -f ` + provision.ProvisioningReadyPath + `; do
+  if systemctl is-failed --quiet agent-os-provision.service; then
+    systemctl status --no-pager agent-os-provision.service >&2 || true
+    exit 1
+  fi
+  sleep 2
+done
+`
 }
 
 func (l Lima) Stop(ctx context.Context, name string) error {
@@ -201,7 +214,7 @@ func (l Lima) ExecAsUser(ctx context.Context, name, user string, args []string, 
 		return fmt.Errorf("unsupported guest user %q", user)
 	}
 	commandArgs := []string{
-		"shell", name, "--", "sudo", "-u", user, "--", "/usr/bin/env",
+		"shell", "--workdir", provision.AgentHome, name, "--", "sudo", "-u", user, "-H", "--", "/usr/bin/env",
 		"HOME=" + provision.AgentHome,
 		"SHELL=/bin/bash",
 		"PATH=" + provision.AgentManagedPath,

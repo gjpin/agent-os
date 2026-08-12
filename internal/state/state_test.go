@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -42,5 +43,32 @@ func TestLockRejectsPathTraversal(t *testing.T) {
 	store := NewStore(t.TempDir())
 	if err := store.WithLock(context.Background(), "../escape", func() error { return nil }); err == nil {
 		t.Fatal("expected invalid VM name")
+	}
+}
+
+func TestDeleteRemovesStateLockAndArtifacts(t *testing.T) {
+	store := NewStore(t.TempDir())
+	if err := store.Save(State{Name: "agents", Provider: "lima", Lifecycle: model.StatusStopped}); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := store.VMDir("agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "artifacts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lockPath, err := store.LockPath("agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete("agents"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("VM state directory still exists: %s (err=%v)", dir, err)
 	}
 }
