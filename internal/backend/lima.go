@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/gjpin/agent-os/internal/artifacts"
@@ -31,6 +33,53 @@ func (l Lima) Available(ctx context.Context) error {
 		return fmt.Errorf("Lima is unavailable: %w", err)
 	}
 	return nil
+}
+
+var limaVersionPattern = regexp.MustCompile(`(^|[^0-9])v?([0-9]+)\.([0-9]+)(\.([0-9]+))?`)
+
+func (l Lima) EnableAutostart(ctx context.Context, name string) error {
+	if !model.VMNameIsValid(name) {
+		return fmt.Errorf("invalid VM name %q", name)
+	}
+	version, major, minor, err := l.version(ctx)
+	if err != nil {
+		return fmt.Errorf("cannot determine Lima version for boot-time autostart; install Lima 2.2 or newer: %w", err)
+	}
+	if major < 2 || (major == 2 && minor < 2) {
+		return fmt.Errorf("Lima %s does not support boot-time autostart; upgrade to Lima 2.2 or newer and retry", version)
+	}
+	return command(l.Runner, ctx, "limactl", []string{"autostart", "enable", "--condition=boot", name}, nil, l.Out, l.Err)
+}
+
+func (l Lima) DisableAutostart(ctx context.Context, name string) error {
+	if !model.VMNameIsValid(name) {
+		return fmt.Errorf("invalid VM name %q", name)
+	}
+	return command(l.Runner, ctx, "limactl", []string{"autostart", "disable", name}, nil, l.Out, l.Err)
+}
+
+func (l Lima) version(ctx context.Context) (string, int, int, error) {
+	var output bytes.Buffer
+	if err := command(l.Runner, ctx, "limactl", []string{"--version"}, nil, &output, l.Err); err != nil {
+		return "", 0, 0, err
+	}
+	matches := limaVersionPattern.FindStringSubmatch(output.String())
+	if len(matches) < 4 {
+		return "", 0, 0, fmt.Errorf("unrecognized version output %q", strings.TrimSpace(output.String()))
+	}
+	major, err := strconv.Atoi(matches[2])
+	if err != nil {
+		return "", 0, 0, err
+	}
+	minor, err := strconv.Atoi(matches[3])
+	if err != nil {
+		return "", 0, 0, err
+	}
+	version := matches[2] + "." + matches[3]
+	if len(matches) > 5 && matches[5] != "" {
+		version += "." + matches[5]
+	}
+	return version, major, minor, nil
 }
 
 // Lima owns the host listener from the static portForwards rule in lima.yaml.

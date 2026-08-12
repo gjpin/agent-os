@@ -72,3 +72,24 @@ func TestDeleteRemovesStateLockAndArtifacts(t *testing.T) {
 		t.Fatalf("VM state directory still exists: %s (err=%v)", dir, err)
 	}
 }
+
+func TestOlderStateFilesDecodeWithAutostartDisabled(t *testing.T) {
+	store := NewStore(t.TempDir())
+	path, err := store.Path("agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"schema_version":1,"name":"agents","provider":"lima","lifecycle":"stopped"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	value, err := store.Load("agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.Autostart != nil {
+		t.Fatalf("legacy state unexpectedly enabled autostart: %+v", value.Autostart)
+	}
+}

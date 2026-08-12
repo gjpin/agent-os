@@ -25,7 +25,23 @@ type State struct {
 	CreatedAt     time.Time         `json:"created_at"`
 	UpdatedAt     time.Time         `json:"updated_at"`
 	Artifacts     map[string]string `json:"artifacts,omitempty"`
+	// Autostart is optional so state files written before VM autostart was
+	// introduced continue to decode as disabled. A nil value is equivalent to
+	// an explicitly disabled registration.
+	Autostart *AutostartState `json:"autostart,omitempty"`
 }
+
+// AutostartState records the application's successful host-boot
+// registration. The provider remains the source of truth for the actual
+// registration; this metadata lets the CLI report intent without requiring a
+// provider-specific query command.
+type AutostartState struct {
+	Enabled bool `json:"enabled"`
+}
+
+// Autostart is retained as a concise name for callers that want to construct
+// metadata directly.
+type Autostart = AutostartState
 
 type Store struct {
 	Root string
