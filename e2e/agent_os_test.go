@@ -993,7 +993,7 @@ func guestExecutables() []string {
 	executables = append(executables, []string{
 		"node", "npm", "pnpm", "terraform", "java", "javac",
 		"kind", "podman", "buildah", "skopeo", "opencode", "codex",
-		"claude", "pi", "copilot", "chrome-devtools", "chrome-devtools-mcp",
+		"claude", "agy", "pi", "copilot", "chrome-devtools", "chrome-devtools-mcp",
 	}...)
 	seen := make(map[string]struct{}, len(executables))
 	result := make([]string, 0, len(executables))

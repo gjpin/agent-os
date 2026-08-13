@@ -79,7 +79,7 @@ agent-os status agents
 ```
 
 The first start can take up to 30 minutes while Fedora, the coding agents,
-Orca, and the shared skills are installed.
+including Antigravity CLI, Orca, and the shared skills are installed.
 
 For automatic startup after a server reboot:
 
@@ -241,6 +241,13 @@ agent-os destroy --yes --purge-profiles agents
 ```
 
 The host's coding-agent authentication databases are not copied into the VM.
+
+Google Antigravity CLI is available as `agy`. Start its interactive terminal
+client inside the VM with:
+
+```sh
+agent-os ssh agents -- agy
+```
 
 ## Run and access the VM locally on Apple Silicon macOS
 

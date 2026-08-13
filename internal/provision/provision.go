@@ -253,7 +253,7 @@ func mergePackageSets(sets ...[]string) []string {
 	return result
 }
 
-// CodingAgentsScript returns the root-run, idempotent installer for the six
+// CodingAgentsScript returns the root-run, idempotent installer for the seven
 // coding agents included in every VM. Upstream installers intentionally select
 // their latest release at first boot; the marker prevents a later provisioning
 // replay from unexpectedly upgrading an existing VM.
@@ -331,6 +331,9 @@ run_as_agent /usr/bin/env CODEX_INSTALL_DIR="$agent_home/.local/bin" \
 download_installer https://claude.ai/install.sh "$installer_dir/claude.sh"
 run_as_agent /bin/bash "$installer_dir/claude.sh" latest
 
+download_installer https://antigravity.google/cli/install.sh "$installer_dir/antigravity.sh"
+run_as_agent /bin/bash "$installer_dir/antigravity.sh" --dir "$agent_home/.local/bin"
+
 run_as_agent /usr/bin/npm install --global --ignore-scripts \
   --prefix "$agent_home/.local" @earendil-works/pi-coding-agent
 
@@ -345,7 +348,7 @@ for executable in java javac; do
   test -x "$resolved"
 done
 
-for executable in agent opencode codex claude pi copilot; do
+for executable in agent opencode codex claude agy pi copilot; do
   run_as_agent /bin/sh -c 'resolved=$(command -v "$1") && test -x "$resolved"' sh "$executable"
 done
 
