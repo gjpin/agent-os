@@ -217,7 +217,7 @@ type ProfileMountSpec struct {
 // fedoraBaselinePackages is the canonical development and operations toolset.
 // Debian derives the same capabilities through explicit package replacements.
 var fedoraBaselinePackages = strings.Fields(`
-bash bat bats bind-utils bzip2 ca-certificates cargo chromium
+bash bat bats bind-utils bzip2 ca-certificates cargo
 clang clang-tools-extra cmake coreutils curl diffutils fd-find file
 findutils fzf gawk gcc gcc-c++ gdb gettext-envsubst gh git git-lfs glab
 golang gopls grep gzip iproute iputils jq just less lld lldb llvm lsof
@@ -261,6 +261,8 @@ var debianPackageReplacements = map[string][]string{
 	"perf":                  {"linux-perf"},
 	"pkgconf-pkg-config":    {"pkgconf"},
 	"pnpm":                  nil,
+	"podman":                nil,
+	"podman-docker":         nil,
 	"procps-ng":             {"procps"},
 	"python3-devel":         {"python3-dev"},
 	"python3-scons":         {"scons"},
@@ -368,7 +370,9 @@ fi
 
 dnf install -y %s
 dnf install -y dnf-plugins-core
-dnf config-manager addrepo --from-repofile=https://rpm.releases.hashicorp.com/fedora/hashicorp.repo
+if [ ! -f /etc/yum.repos.d/hashicorp.repo ]; then
+  dnf config-manager addrepo --from-repofile=https://rpm.releases.hashicorp.com/fedora/hashicorp.repo
+fi
 dnf install -y terraform
 dnf install -y adoptium-temurin-java-repository
 dnf config-manager setopt adoptium-temurin-java-repository.enabled=1
@@ -383,7 +387,7 @@ touch "$ready_marker"
 chmod 0644 "$ready_marker"
 `, packageArguments(packages)), nil
 	case DistributionDebian:
-		aptPackages := mergePackageSets(packages, []string{"helm", "terraform", "temurin-25-jdk", "tofu"})
+		aptPackages := mergePackageSets(packages, []string{"containerd.io", "docker-buildx-plugin", "docker-ce", "docker-ce-cli", "docker-compose-plugin", "helm", "terraform", "temurin-25-jdk", "tofu"})
 		return fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -401,6 +405,21 @@ cleanup() {
   rm -rf -- "$installer_dir"
 }
 trap cleanup EXIT
+
+for conflicting_package in docker.io docker-compose docker-doc docker-buildx podman podman-docker containerd runc; do
+  apt-get remove -y "$conflicting_package" || true
+done
+curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+chmod 0644 /etc/apt/keyrings/docker.asc
+docker_arch=$(dpkg --print-architecture)
+cat > /etc/apt/sources.list.d/docker.sources <<AGENT_OS_DOCKER_REPOSITORY
+Types: deb
+URIs: https://download.docker.com/linux/debian
+Suites: trixie
+Components: stable
+Architectures: $docker_arch
+Signed-By: /etc/apt/keyrings/docker.asc
+AGENT_OS_DOCKER_REPOSITORY
 
 curl -fsSL https://packages.buildkite.com/helm-linux/helm-debian/gpgkey -o "$installer_dir/helm.gpg"
 helm_fingerprint=$(gpg --show-keys --with-colons "$installer_dir/helm.gpg" | awk -F: '$1 == "fpr" {print $10; exit}')
@@ -425,6 +444,10 @@ chmod 0644 /etc/apt/keyrings/*.gpg /etc/apt/sources.list.d/*.list
 apt-get update
 apt-get install -y %s
 
+groupadd --force docker
+usermod -aG docker agent
+systemctl enable --now docker.service containerd.service
+
 if [ -x /usr/bin/fdfind ] && [ ! -e /usr/local/bin/fd ]; then
   ln -s /usr/bin/fdfind /usr/local/bin/fd
 fi
@@ -445,6 +468,53 @@ chmod 0644 "$ready_marker"
 	default:
 		return "", fmt.Errorf("unsupported distro %q", distribution)
 	}
+}
+
+// ChromeInstallScript installs Google Chrome Stable from Google's native
+// package for the selected guest architecture. The package configures Google's
+// repository so subsequent distro upgrades also upgrade Chrome.
+func ChromeInstallScript(distribution Distribution, architecture string) (string, error) {
+	var packageURL, extension, installCommand string
+	switch distribution {
+	case DistributionFedora:
+		extension = "rpm"
+		installCommand = `dnf install -y "$package_path"`
+		switch architecture {
+		case "x86_64":
+			packageURL = "https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm"
+		case "aarch64":
+			packageURL = "https://dl.google.com/dl/linux/direct/google-chrome-stable_current_aarch64.rpm"
+		default:
+			return "", fmt.Errorf("Google Chrome Fedora package is not published for architecture %q", architecture)
+		}
+	case DistributionDebian:
+		extension = "deb"
+		installCommand = `DEBIAN_FRONTEND=noninteractive apt-get install -y "$package_path"`
+		switch architecture {
+		case "x86_64":
+			packageURL = "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
+		case "aarch64":
+			packageURL = "https://dl.google.com/linux/direct/google-chrome-stable_current_arm64.deb"
+		default:
+			return "", fmt.Errorf("Google Chrome Debian package is not published for architecture %q", architecture)
+		}
+	default:
+		return "", fmt.Errorf("unsupported distro %q", distribution)
+	}
+	return fmt.Sprintf(`#!/bin/bash
+set -euo pipefail
+
+package_path=$(mktemp /tmp/agent-os-google-chrome.XXXXXX.%s)
+cleanup() {
+  rm -f -- "$package_path"
+}
+trap cleanup EXIT
+curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  --retry 5 --output "$package_path" -- %s
+%s
+resolved=$(command -v google-chrome-stable)
+test -x "$resolved"
+`, extension, shellQuote(packageURL), installCommand), nil
 }
 
 // CodingAgentsScript returns the root-run, idempotent installer for the seven
@@ -520,8 +590,11 @@ run_as_agent /bin/bash "$installer_dir/claude.sh" latest
 download_installer https://antigravity.google/cli/install.sh "$installer_dir/antigravity.sh"
 run_as_agent /bin/bash "$installer_dir/antigravity.sh" --dir "$agent_home/.local/bin"
 
+run_as_agent /usr/bin/npm config set prefix "$agent_home/.local"
+run_as_agent /usr/bin/npm install --global \
+  --prefix "$agent_home/.local" @devcontainers/cli@latest
 run_as_agent /usr/bin/npm install --global --ignore-scripts \
-  --prefix "$agent_home/.local" @earendil-works/pi-coding-agent
+  --prefix "$agent_home/.local" @earendil-works/pi-coding-agent@latest
 
 ` + chromeDevToolsInstallBlock(skills) + `
 
@@ -534,7 +607,7 @@ for executable in java javac; do
   test -x "$resolved"
 done
 
-for executable in agent opencode codex claude agy pi copilot; do
+for executable in agent opencode codex claude agy pi copilot devcontainer; do
   run_as_agent /bin/sh -c 'resolved=$(command -v "$1") && test -x "$resolved"' sh "$executable"
 done
 
@@ -631,6 +704,72 @@ chmod 0755 /usr/local/bin/kind
 test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
 for executable in /usr/bin/kind /usr/bin/podman /usr/bin/systemd-run /usr/local/bin/kind; do
   test -x "$executable"
+done
+`
+}
+
+// KindDockerScript validates Docker CE and kind for the unprivileged agent.
+func KindDockerScript() string {
+	return `#!/bin/bash
+set -euo pipefail
+
+groupadd --force docker
+usermod -aG docker agent
+systemctl enable --now docker.service containerd.service
+test -x /usr/bin/docker
+test -x /usr/bin/kind
+systemctl is-active --quiet docker.service
+/usr/sbin/runuser --user agent -- /usr/bin/env \
+  HOME=/home/agent PATH=/home/agent/.local/bin:/home/agent/.opencode/bin:/usr/local/bin:/usr/bin:/bin \
+  /usr/bin/docker info >/dev/null
+`
+}
+
+// ContainerRuntimeScript returns the distro-specific container runtime setup.
+func ContainerRuntimeScript(distribution Distribution) (string, error) {
+	switch distribution {
+	case DistributionFedora:
+		return KindPodmanScript(), nil
+	case DistributionDebian:
+		return KindDockerScript(), nil
+	default:
+		return "", fmt.Errorf("unsupported distro %q", distribution)
+	}
+}
+
+// PackageUpgradeScript upgrades every package from configured repositories.
+func PackageUpgradeScript(distribution Distribution) (string, error) {
+	switch distribution {
+	case DistributionFedora:
+		return "#!/bin/bash\nset -euo pipefail\ndnf upgrade --refresh -y\n", nil
+	case DistributionDebian:
+		return "#!/bin/bash\nset -euo pipefail\nexport DEBIAN_FRONTEND=noninteractive\napt-get update\napt-get full-upgrade -y\n", nil
+	default:
+		return "", fmt.Errorf("unsupported distro %q", distribution)
+	}
+}
+
+// GlobalNPMUpgradeScript upgrades all top-level packages in the agent-owned
+// global npm prefix, including packages installed outside agent-os.
+func GlobalNPMUpgradeScript() string {
+	return `#!/bin/bash
+set -euo pipefail
+
+readonly agent_home=/home/agent
+readonly managed_path=/home/agent/.local/bin:/home/agent/.opencode/bin:/usr/local/bin:/usr/bin:/bin
+manifest=$(mktemp /tmp/agent-os-global-npm.XXXXXX.json)
+cleanup() {
+  rm -f -- "$manifest"
+}
+trap cleanup EXIT
+
+/usr/sbin/runuser --user agent -- /usr/bin/env \
+  HOME="$agent_home" PATH="$managed_path" \
+  /usr/bin/npm ls --global --prefix "$agent_home/.local" --depth=0 --json > "$manifest" || true
+jq -r '(.dependencies // {}) | keys[]' "$manifest" | while IFS= read -r package; do
+  /usr/sbin/runuser --user agent -- /usr/bin/env \
+    HOME="$agent_home" PATH="$managed_path" \
+    /usr/bin/npm install --global --prefix "$agent_home/.local" "${package}@latest"
 done
 `
 }

@@ -54,7 +54,7 @@ func TestLimaAutostartIsHostSpecific(t *testing.T) {
 	}
 }
 
-func TestLimaUpgradeEnsuresProfileThenRestartsOrca(t *testing.T) {
+func TestLimaUpgradeReconcilesGuestThenRestartsOrca(t *testing.T) {
 	config := model.DefaultConfig(t.TempDir())
 	r := &limaDiskRunner{diskJSON: `[]`}
 	if err := (Lima{Runner: r, VMType: "qemu"}).Upgrade(context.Background(), config.VMName, Spec{Config: config}); err != nil {
@@ -64,7 +64,9 @@ func TestLimaUpgradeEnsuresProfileThenRestartsOrca(t *testing.T) {
 	for _, want := range []string{
 		"limactl disk list --json",
 		"limactl disk create " + profileDiskID(config.VMName),
-		"limactl shell agents sudo systemctl restart orca.service",
+		"limactl shell agents -- sudo /bin/rm -f /var/lib/agent-os/coding-agents-ready",
+		"limactl shell agents -- sudo /bin/bash -s",
+		"limactl shell agents -- sudo systemctl restart orca.service",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("upgrade calls omit %q:\n%s", want, got)

@@ -264,10 +264,60 @@ func (l Lima) PurgeProfile(ctx context.Context, spec Spec) error {
 }
 
 func (l Lima) Upgrade(ctx context.Context, name string, spec Spec) error {
+	if spec.Distribution == "" {
+		spec.Distribution = model.DistributionFedora
+	}
+	if spec.Architecture == "" {
+		spec.Architecture = "x86_64"
+	}
 	if err := ensureLimaProfile(ctx, l.Runner, l.Out, l.Err, spec); err != nil {
 		return err
 	}
-	return command(l.Runner, ctx, "limactl", []string{"shell", name, "sudo", "systemctl", "restart", "orca.service"}, nil, l.Out, l.Err)
+	distributionSetup, err := provision.DistributionSetupScript(spec.Distribution, spec.Config.Packages)
+	if err != nil {
+		return err
+	}
+	packageUpgrade, err := provision.PackageUpgradeScript(spec.Distribution)
+	if err != nil {
+		return err
+	}
+	chromeInstall, err := provision.ChromeInstallScript(spec.Distribution, spec.Architecture)
+	if err != nil {
+		return err
+	}
+	containerRuntime, err := provision.ContainerRuntimeScript(spec.Distribution)
+	if err != nil {
+		return err
+	}
+	orcaInstall, err := releases.OrcaLatestInstallScript(spec.Distribution, spec.Architecture)
+	if err != nil {
+		return err
+	}
+	if err := l.RefreshAgentInstructions(ctx, name, spec.AgentInstructions); err != nil {
+		return fmt.Errorf("refresh agent instructions: %w", err)
+	}
+	if err := l.ExecAsRoot(ctx, name, []string{"/bin/rm", "-f", provision.CodingAgentsReadyPath, provision.OrcaSkillsReadyPath, "/var/lib/agent-os/distribution-ready"}, nil, l.Out, l.Err); err != nil {
+		return fmt.Errorf("prepare guest reconciliation: %w", err)
+	}
+	scripts := []struct {
+		name   string
+		script string
+	}{
+		{"distribution setup", distributionSetup},
+		{"package upgrade", packageUpgrade},
+		{"Chrome installation", chromeInstall},
+		{"container runtime setup", containerRuntime},
+		{"coding-agent upgrade", provision.CodingAgentsScript(spec.Config.Skills)},
+		{"global npm upgrade", provision.GlobalNPMUpgradeScript()},
+		{"Orca upgrade", orcaInstall},
+		{"Orca skills upgrade", provision.OrcaSkillsScript()},
+	}
+	for _, step := range scripts {
+		if err := l.ExecAsRoot(ctx, name, []string{"/bin/bash", "-s"}, strings.NewReader(step.script), l.Out, l.Err); err != nil {
+			return fmt.Errorf("%s: %w", step.name, err)
+		}
+	}
+	return l.ExecAsRoot(ctx, name, []string{"systemctl", "restart", "orca.service"}, nil, l.Out, l.Err)
 }
 
 func (l Lima) Exec(ctx context.Context, name string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {

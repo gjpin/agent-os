@@ -33,7 +33,20 @@ type App struct {
 	configPath        string
 	logFormat         string
 	flagValues        map[string]any
-	agentInstructions string
+	agentInstructions AgentInstructions
+}
+
+// AgentInstructions contains the guest instructions selected by distribution.
+type AgentInstructions struct {
+	Fedora string
+	Debian string
+}
+
+func (i AgentInstructions) For(distribution model.Distribution) string {
+	if distribution == model.DistributionDebian {
+		return i.Debian
+	}
+	return i.Fedora
 }
 
 // Version is set by release builds; development builds report dev.
@@ -50,6 +63,12 @@ func New(in io.Reader, out, errOut io.Writer, runner execx.Runner, instructions 
 // NewWithInstructions constructs an application with the repository
 // instructions that should be provisioned into newly created VMs.
 func NewWithInstructions(in io.Reader, out, errOut io.Writer, runner execx.Runner, agentInstructions string) *App {
+	return NewWithInstructionSet(in, out, errOut, runner, AgentInstructions{Fedora: agentInstructions, Debian: agentInstructions})
+}
+
+// NewWithInstructionSet constructs an application with distro-specific
+// repository instructions.
+func NewWithInstructionSet(in io.Reader, out, errOut io.Writer, runner execx.Runner, agentInstructions AgentInstructions) *App {
 	if in == nil {
 		in = os.Stdin
 	}
@@ -76,6 +95,17 @@ func Execute(agentInstructions ...string) {
 		content = agentInstructions[0]
 	}
 	app := NewWithInstructions(os.Stdin, os.Stdout, os.Stderr, execx.OSRunner{}, content)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := app.root.ExecuteContext(ctx); err != nil {
+		fmt.Fprintln(app.Err, "agent-os:", err)
+		os.Exit(1)
+	}
+}
+
+// ExecuteWithInstructions runs the CLI with distro-specific guest instructions.
+func ExecuteWithInstructions(agentInstructions AgentInstructions) {
+	app := NewWithInstructionSet(os.Stdin, os.Stdout, os.Stderr, execx.OSRunner{}, agentInstructions)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := app.root.ExecuteContext(ctx); err != nil {
@@ -248,7 +278,7 @@ func (a *App) backendSpec(c model.Config, distribution model.Distribution, dryRu
 		Config:            c,
 		Distribution:      distribution,
 		Architecture:      architectureForHost(),
-		AgentInstructions: a.agentInstructions,
+		AgentInstructions: a.agentInstructions.For(distribution),
 		DryRun:            dryRun,
 	}
 }

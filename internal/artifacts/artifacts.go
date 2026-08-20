@@ -96,6 +96,14 @@ func LimaYAML(def VMDefinition) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("generate distro setup: %w", err)
 	}
+	chromeInstallScript, err := provision.ChromeInstallScript(def.Distribution, def.Architecture)
+	if err != nil {
+		return "", fmt.Errorf("generate Chrome setup: %w", err)
+	}
+	containerRuntimeScript, err := provision.ContainerRuntimeScript(def.Distribution)
+	if err != nil {
+		return "", fmt.Errorf("generate container runtime setup: %w", err)
+	}
 	var b strings.Builder
 	if def.VMType != "qemu" && def.VMType != "vz" {
 		return "", fmt.Errorf("unsupported Lima VM type %q", def.VMType)
@@ -109,7 +117,6 @@ func LimaYAML(def VMDefinition) (string, error) {
 		fmt.Fprintf(&b, "additionalDisks:\n  - name: %s\n    format: %t\n    fsType: ext4\n", strconv.Quote(def.ProfileDiskID), def.ProfileDiskFormat)
 	}
 	agentInstructionsScript := provision.AgentInstructionsScript(def.AgentInstructions)
-	kindPodmanScript := provision.KindPodmanScript()
 	codingAgentsScript := provision.CodingAgentsScript(def.Skills)
 	orcaSkillsScript := provision.OrcaSkillsScript()
 	firewallArgs := optionalPort(def.OrcaPort)
@@ -138,9 +145,12 @@ func LimaYAML(def VMDefinition) (string, error) {
 	provisioning.WriteString("cat > /run/agent-os-setup-distribution <<'AGENT_OS_DISTRIBUTION_SETUP'\n")
 	appendIndented(&provisioning, distributionSetupScript, "")
 	provisioning.WriteString("AGENT_OS_DISTRIBUTION_SETUP\n/bin/bash /run/agent-os-setup-distribution\n")
-	provisioning.WriteString("cat > /run/agent-os-setup-kind-podman <<'AGENT_OS_KIND_PODMAN'\n")
-	appendIndented(&provisioning, kindPodmanScript, "")
-	provisioning.WriteString("AGENT_OS_KIND_PODMAN\n/bin/bash /run/agent-os-setup-kind-podman\n")
+	provisioning.WriteString("cat > /run/agent-os-install-chrome <<'AGENT_OS_CHROME'\n")
+	appendIndented(&provisioning, chromeInstallScript, "")
+	provisioning.WriteString("AGENT_OS_CHROME\n/bin/bash /run/agent-os-install-chrome\n")
+	provisioning.WriteString("cat > /run/agent-os-setup-container-runtime <<'AGENT_OS_CONTAINER_RUNTIME'\n")
+	appendIndented(&provisioning, containerRuntimeScript, "")
+	provisioning.WriteString("AGENT_OS_CONTAINER_RUNTIME\n/bin/bash /run/agent-os-setup-container-runtime\n")
 	provisioning.WriteString("cat > /run/agent-os-install-coding-agents <<'AGENT_OS_CODING_AGENTS'\n")
 	appendIndented(&provisioning, codingAgentsScript, "")
 	provisioning.WriteString("AGENT_OS_CODING_AGENTS\n/bin/bash /run/agent-os-install-coding-agents\n")
@@ -288,6 +298,7 @@ User=agent
 Group=agent
 ExecStart=/usr/bin/orca serve --port %d --pairing-address %s
 Environment=HOME=/home/agent
+Environment=PATH=%s
 Environment=ORCA_MODE=headless
 Environment=ORCA_PORT=%d
 Environment=ORCA_BIND_ADDRESS=%s
@@ -301,7 +312,7 @@ ReadWritePaths=/home/agent /var/lib/agent-os/profile
 
 [Install]
 WantedBy=multi-user.target
-`, port, pairing, port, bindAddress)
+`, port, pairing, provision.AgentManagedPath, port, bindAddress)
 }
 
 func orcaReadinessScript(port int) string {

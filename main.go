@@ -10,9 +10,15 @@ import (
 // here keeps installed binaries independent of the directory from which they
 // are invoked.
 //
-//go:embed internal/instructions/AGENTS.md
-var agentInstructions string
+//go:embed internal/instructions/fedora/AGENTS.md
+var fedoraAgentInstructions string
+
+//go:embed internal/instructions/debian/AGENTS.md
+var debianAgentInstructions string
 
 func main() {
-	cli.Execute(agentInstructions)
+	cli.ExecuteWithInstructions(cli.AgentInstructions{
+		Fedora: fedoraAgentInstructions,
+		Debian: debianAgentInstructions,
+	})
 }

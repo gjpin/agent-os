@@ -28,3 +28,24 @@ func TestOrcaInstallScriptSelectsDebianPackage(t *testing.T) {
 		}
 	}
 }
+
+func TestOrcaLatestInstallScriptVerifiesPublishedDigest(t *testing.T) {
+	for _, tc := range []struct {
+		distribution provision.Distribution
+		architecture string
+		assetPart    string
+	}{
+		{provision.DistributionFedora, "x86_64", `x86_64\.rpm`},
+		{provision.DistributionDebian, "aarch64", `arm64\.deb`},
+	} {
+		script, err := OrcaLatestInstallScript(tc.distribution, tc.architecture)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"releases/latest", tc.assetPart, `startswith("sha256:")`, `test "$actual" = "$expected"`} {
+			if !strings.Contains(script, want) {
+				t.Errorf("latest Orca installer omits %q", want)
+			}
+		}
+	}
+}

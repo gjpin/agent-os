@@ -70,7 +70,11 @@ func TestAgentOSE2E(t *testing.T) {
 	}
 
 	root := moduleRoot(t)
-	expectedInstructions, err := os.ReadFile(filepath.Join(root, "internal", "instructions", "AGENTS.md"))
+	instructionDistro := os.Getenv("AGENT_OS_E2E_DISTRO")
+	if instructionDistro == "" {
+		instructionDistro = string(model.DistributionFedora)
+	}
+	expectedInstructions, err := os.ReadFile(filepath.Join(root, "internal", "instructions", instructionDistro, "AGENTS.md"))
 	if err != nil {
 		t.Fatalf("read embedded instruction source: %v", err)
 	}
@@ -88,6 +92,9 @@ func TestAgentOSE2E(t *testing.T) {
 	h.mustCLI(t, e2eCommandTimeout, "start", h.vmName)
 	h.assertStatus(t, "running")
 	h.mustCLI(t, e2eCommandTimeout, "verify", h.vmName)
+	h.waitForHostPort(t)
+	h.assertGuestHealth(t)
+	h.mustCLI(t, e2eCommandTimeout, "upgrade", "--yes", h.vmName)
 	h.waitForHostPort(t)
 	h.assertGuestHealth(t)
 
@@ -805,18 +812,6 @@ systemctl is-enabled --quiet orca.service
 systemctl is-active --quiet orca.service
 systemctl is-enabled --quiet agent-os-firewall.service
 systemctl is-active --quiet agent-os-firewall.service
-agent_uid="$(id -u agent)"
-user_unit_state="$(systemctl is-enabled "user@$agent_uid.service" 2>/dev/null || true)"
-case "$user_unit_state" in
-  enabled|static|indirect|generated|alias) ;;
-  *) echo "user@$agent_uid.service is not enabled: $user_unit_state" >&2; exit 1 ;;
-esac
-systemctl is-active --quiet "user@$agent_uid.service"
-delegate="$(systemctl show --property=Delegate --value "user@$agent_uid.service")"
-printf '%s\n' "$delegate" | grep -Eiq '^(yes|true)$'
-linger="$(loginctl show-user agent --property=Linger --value)"
-printf '%s\n' "$linger" | grep -Eiq '^(yes|true)$'
-test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
 mount_fstype="$(findmnt -no FSTYPE --target /var/lib/agent-os/profile)"
 test "$mount_fstype" = ext4
 mount_options="$(findmnt -no OPTIONS --target /var/lib/agent-os/profile)"
@@ -849,10 +844,6 @@ if ! ss -H -ltn | awk -v port=":%d" '$4 ~ (port "$") { found=1 } END { exit !fou
   ss -H -ltn
   exit 1
 fi
-test -x /usr/local/bin/kind
-grep -Fq 'KIND_EXPERIMENTAL_PROVIDER' /usr/local/bin/kind
-grep -Fq 'log_driver = "k8s-file"' /home/agent/.config/containers/containers.conf.d/agent-os-kind.conf
-grep -Fq 'pids_limit = 65536' /home/agent/.config/containers/containers.conf.d/agent-os-kind.conf
 if [ -e /home/agent/.claude.json ] || [ -L /home/agent/.claude.json ]; then
   test -f /home/agent/.claude.json
   test ! -L /home/agent/.claude.json
@@ -860,6 +851,35 @@ if [ -e /home/agent/.claude.json ] || [ -L /home/agent/.claude.json ]; then
   cmp -s /home/agent/.claude.json /var/lib/agent-os/profile/claude.json
 fi
 `, shellQuote(instructionsPath()), shellQuote(guestKeyPath), shellQuote(guestKeyPath), shellQuote(guestKeyPath), orcaPort, orcaPort, orcaPort)
+	if distribution == model.DistributionDebian {
+		b.WriteString(`dpkg-query --show -- google-chrome-stable docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+! dpkg-query --show -- podman podman-docker >/dev/null 2>&1
+! command -v podman >/dev/null 2>&1
+systemctl is-enabled --quiet docker.service
+systemctl is-active --quiet docker.service
+id -nG agent | tr ' ' '\n' | grep -Fxq docker
+test -x /usr/bin/kind
+`)
+	} else {
+		b.WriteString(`rpm -q -- google-chrome-stable podman podman-docker buildah skopeo
+agent_uid="$(id -u agent)"
+user_unit_state="$(systemctl is-enabled "user@$agent_uid.service" 2>/dev/null || true)"
+case "$user_unit_state" in
+  enabled|static|indirect|generated|alias) ;;
+  *) echo "user@$agent_uid.service is not enabled: $user_unit_state" >&2; exit 1 ;;
+esac
+systemctl is-active --quiet "user@$agent_uid.service"
+delegate="$(systemctl show --property=Delegate --value "user@$agent_uid.service")"
+printf '%s\n' "$delegate" | grep -Eiq '^(yes|true)$'
+linger="$(loginctl show-user agent --property=Linger --value)"
+printf '%s\n' "$linger" | grep -Eiq '^(yes|true)$'
+test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
+test -x /usr/local/bin/kind
+grep -Fq 'KIND_EXPERIMENTAL_PROVIDER' /usr/local/bin/kind
+grep -Fq 'log_driver = "k8s-file"' /home/agent/.config/containers/containers.conf.d/agent-os-kind.conf
+grep -Fq 'pids_limit = 65536' /home/agent/.config/containers/containers.conf.d/agent-os-kind.conf
+`)
+	}
 	b.WriteString("test -f /home/agent/.agent-os/AGENTS.md\n")
 	return b.String()
 }
@@ -880,11 +900,16 @@ test "$COPILOT_HOME" = /home/agent/.copilot
 	}
 	b.WriteString(`test -f "$CODEX_HOME/config.toml"
 grep -Eq '^[[:space:]]*cli_auth_credentials_store[[:space:]]*=[[:space:]]*"file"[[:space:]]*$' "$CODEX_HOME/config.toml"
-export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
-podman info --format json | jq -e '(.host.security.rootless == true) and (.host.cgroupVersion == "v2" or .host.cgroupVersion == "2")' >/dev/null
 test -n "$(find "$HOME/.agents/skills" -type f -name SKILL.md -print -quit)"
 `)
+	if distribution == model.DistributionDebian {
+		b.WriteString("docker info >/dev/null\n")
+	} else {
+		b.WriteString(`export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+podman info --format json | jq -e '(.host.security.rootless == true) and (.host.cgroupVersion == "v2" or .host.cgroupVersion == "2")' >/dev/null
+`)
+	}
 	return b.String()
 }
 
@@ -950,9 +975,14 @@ func guestExecutables(distribution model.Distribution) []string {
 	executables := provision.RequiredExecutables(provision.BaselinePackages(distribution))
 	executables = append(executables, []string{
 		"node", "npm", "pnpm", "terraform", "tofu", "helm", "uv", "uvx", "java", "javac",
-		"kind", "podman", "buildah", "skopeo", "opencode", "codex",
-		"claude", "agy", "pi", "copilot", "chrome-devtools", "chrome-devtools-mcp",
+		"kind", "opencode", "codex", "claude", "agy", "pi", "copilot", "devcontainer",
+		"google-chrome-stable", "chrome-devtools", "chrome-devtools-mcp",
 	}...)
+	if distribution == model.DistributionDebian {
+		executables = append(executables, "docker")
+	} else {
+		executables = append(executables, "podman", "buildah", "skopeo")
+	}
 	seen := make(map[string]struct{}, len(executables))
 	result := make([]string, 0, len(executables))
 	for _, executable := range executables {

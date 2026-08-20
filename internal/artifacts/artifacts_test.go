@@ -38,16 +38,16 @@ func TestLimaYAMLComposesSharedSetupOnceForEachDistro(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, marker := range []string{"cat > /run/agent-os-install-coding-agents <<'AGENT_OS_CODING_AGENTS'", "cat > /run/agent-os-install-orca <<'AGENT_OS_ORCA_INSTALL'", "cat > /run/agent-os-setup-kind-podman <<'AGENT_OS_KIND_PODMAN'"} {
+		for _, marker := range []string{"cat > /run/agent-os-install-coding-agents <<'AGENT_OS_CODING_AGENTS'", "cat > /run/agent-os-install-orca <<'AGENT_OS_ORCA_INSTALL'", "cat > /run/agent-os-install-chrome <<'AGENT_OS_CHROME'", "cat > /run/agent-os-setup-container-runtime <<'AGENT_OS_CONTAINER_RUNTIME'"} {
 			if strings.Count(got, marker) != 1 {
 				t.Errorf("%s artifact contains %q %d times", distribution, marker, strings.Count(got, marker))
 			}
 		}
 		if distribution == model.DistributionDebian {
-			if !strings.Contains(got, "apt.releases.hashicorp.com trixie") || strings.Contains(got, "rpmdevtools") {
+			if !strings.Contains(got, "download.docker.com/linux/debian") || !strings.Contains(got, "google-chrome-stable_current_amd64.deb") || strings.Contains(got, "KIND_EXPERIMENTAL_PROVIDER") {
 				t.Fatalf("unexpected Debian distro setup")
 			}
-		} else if !strings.Contains(got, "rpm.releases.hashicorp.com/fedora") {
+		} else if !strings.Contains(got, "rpm.releases.hashicorp.com/fedora") || !strings.Contains(got, "google-chrome-stable_current_x86_64.rpm") || !strings.Contains(got, "KIND_EXPERIMENTAL_PROVIDER") {
 			t.Fatalf("Fedora distro setup omitted HashiCorp repository")
 		}
 	}

@@ -2,6 +2,7 @@ package releases
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/gjpin/agent-os/internal/provision"
 )
@@ -95,4 +96,64 @@ if [ ! -e /usr/bin/orca ] && [ ! -L /usr/bin/orca ]; then
 fi
 /usr/bin/test -x /usr/bin/orca
 `, packageInfo.Extension, packageInfo.URL, packageInfo.SHA256, installCommand), nil
+}
+
+// OrcaLatestInstallScript installs the latest stable GitHub release and
+// verifies the SHA-256 digest published with the selected release asset.
+func OrcaLatestInstallScript(distribution provision.Distribution, architecture string) (string, error) {
+	var assetPattern, extension, installCommand string
+	switch distribution {
+	case provision.DistributionFedora:
+		extension = "rpm"
+		installCommand = `/usr/bin/dnf install -y "$package_path"`
+		if architecture == "x86_64" {
+			assetPattern = `^orca-ide-[0-9.]+\.x86_64\.rpm$`
+		} else if architecture == "aarch64" {
+			assetPattern = `^orca-ide-[0-9.]+\.aarch64\.rpm$`
+		}
+	case provision.DistributionDebian:
+		extension = "deb"
+		installCommand = `DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get install -y "$package_path"`
+		if architecture == "x86_64" {
+			assetPattern = `^orca-ide_[0-9.]+_amd64\.deb$`
+		} else if architecture == "aarch64" {
+			assetPattern = `^orca-ide_[0-9.]+_arm64\.deb$`
+		}
+	default:
+		return "", fmt.Errorf("unsupported distro %q", distribution)
+	}
+	if assetPattern == "" {
+		return "", fmt.Errorf("Orca latest package is not supported for architecture %q", architecture)
+	}
+	return fmt.Sprintf(`#!/bin/bash
+set -euo pipefail
+umask 077
+
+metadata=$(mktemp /tmp/agent-os-orca-release.XXXXXX.json)
+package_path=$(mktemp /tmp/agent-os-orca.XXXXXX.%s)
+cleanup() {
+  rm -f -- "$metadata" "$package_path"
+}
+trap cleanup EXIT
+/usr/bin/curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  --retry 5 --output "$metadata" -- https://api.github.com/repos/stablyai/orca/releases/latest
+asset=$(/usr/bin/jq -cer --arg pattern %s \
+  '[.assets[] | select(.name | test($pattern))] | if length == 1 then .[0] else error("expected exactly one Orca package") end' "$metadata")
+url=$(printf '%%s' "$asset" | /usr/bin/jq -er '.browser_download_url | select(startswith("https://github.com/stablyai/orca/releases/download/"))')
+expected=$(printf '%%s' "$asset" | /usr/bin/jq -er '.digest | select(startswith("sha256:")) | sub("^sha256:"; "")')
+/usr/bin/curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  --retry 5 --output "$package_path" -- "$url"
+actual=$(/usr/bin/sha256sum "$package_path" | /usr/bin/awk '{print $1}')
+test "$actual" = "$expected"
+%s
+/usr/bin/test -x /usr/bin/orca-ide
+if [ ! -e /usr/bin/orca ] && [ ! -L /usr/bin/orca ]; then
+  /usr/bin/ln -s /usr/bin/orca-ide /usr/bin/orca
+fi
+/usr/bin/test -x /usr/bin/orca
+`, extension, shellQuoteForScript(assetPattern), installCommand), nil
+}
+
+func shellQuoteForScript(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }

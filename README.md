@@ -11,7 +11,9 @@ Virtualization.framework (`vz`) on Apple Silicon macOS.
 - Creates, starts, stops, upgrades, verifies, and destroys agent VMs.
 - Requires an explicit Fedora or Debian unstable selection when each VM is created.
 - Keeps agent credentials and configuration on a Lima-managed persistent disk.
-- Uses isolated plain-mode VMs with no host mounts, containerd, or Rosetta.
+- Uses isolated plain-mode VMs with no host mounts, Lima-managed containerd, or Rosetta.
+- Uses rootless Podman in Fedora guests and Docker CE in Debian guests.
+- Includes Google Chrome Stable and the Dev Containers CLI.
 - Provides static local or WireGuard-bound forwarding to Orca.
 - Runs guest commands through `limactl shell`.
 - Supports autostart at Linux user login or macOS system boot with Lima 2.2+.
@@ -27,6 +29,7 @@ go build -o bin/agent-os .
 bin/agent-os create --distro fedora agents
 bin/agent-os start agents
 bin/agent-os verify agents
+bin/agent-os upgrade --yes agents
 bin/agent-os ssh agents
 ```
 

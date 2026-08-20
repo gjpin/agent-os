@@ -13,7 +13,7 @@ import (
 
 func TestBaselinePackagesAreExactSortedAndDuplicateFree(t *testing.T) {
 	want := strings.Fields(`
-bash bat bats bind-utils bzip2 ca-certificates cargo chromium
+bash bat bats bind-utils bzip2 ca-certificates cargo
 clang clang-tools-extra cmake coreutils curl diffutils fd-find file
 findutils fzf gawk gcc gcc-c++ gdb gettext-envsubst gh git git-lfs glab
 golang gopls grep gzip iproute iputils jq just less lld lldb llvm lsof
@@ -256,10 +256,11 @@ func TestCodingAgentsScriptContainsRequiredInstallersAndSafetyControls(t *testin
 		"https://antigravity.google/cli/install.sh",
 		"--dir \"$agent_home/.local/bin\"",
 		"@earendil-works/pi-coding-agent",
+		"@devcontainers/cli@latest",
 		"https://gh.io/copilot-install",
 		"--connect-timeout 15 --max-time 300",
 		"--retry 10 --retry-delay 5 --retry-max-time 300 --retry-all-errors",
-		"for executable in agent opencode codex claude agy pi copilot",
+		"for executable in agent opencode codex claude agy pi copilot devcontainer",
 		"mktemp -d /tmp/agent-os-coding-agents.XXXXXX",
 		"trap cleanup EXIT",
 		"/usr/sbin/runuser --user agent -- /usr/bin/env",
@@ -335,6 +336,9 @@ func TestDistributionSetupScriptsKeepPackageManagersSeparate(t *testing.T) {
 		"PNPM_HOME=/usr/local",
 		"UV_UNMANAGED_INSTALL=/usr/local/bin",
 		"temurin-25-jdk",
+		"download.docker.com/linux/debian",
+		"docker-ce",
+		"usermod -aG docker agent",
 	} {
 		if !strings.Contains(debian, want) {
 			t.Errorf("Debian setup omits %q", want)
@@ -355,7 +359,7 @@ func TestDebianBaselineUsesNativePackageNames(t *testing.T) {
 			t.Errorf("Debian baseline omits %q", want)
 		}
 	}
-	for _, omitted := range []string{"helm", "opentofu", "pnpm", "uv", "rpmdevtools", "redhat-rpm-config", "openjdk"} {
+	for _, omitted := range []string{"helm", "opentofu", "pnpm", "podman", "podman-docker", "uv", "rpmdevtools", "redhat-rpm-config", "openjdk"} {
 		if strings.Contains(joined, "\n"+omitted+"\n") {
 			t.Errorf("Debian baseline contains externally installed or omitted package %q", omitted)
 		}
@@ -453,5 +457,76 @@ func TestKindPodmanScriptContainsRootlessPrerequisites(t *testing.T) {
 	}
 	if strings.Contains(script, "net.ipv4.ip_unprivileged_port_start") || strings.Contains(script, "kernel.dmesg_restrict") {
 		t.Fatal("kind Podman setup relaxes an excluded sysctl")
+	}
+}
+
+func TestChromeInstallScriptsUseGoogleArchitecturePackages(t *testing.T) {
+	tests := []struct {
+		distribution Distribution
+		architecture string
+		want         string
+	}{
+		{DistributionFedora, "x86_64", "google-chrome-stable_current_x86_64.rpm"},
+		{DistributionFedora, "aarch64", "google-chrome-stable_current_aarch64.rpm"},
+		{DistributionDebian, "x86_64", "google-chrome-stable_current_amd64.deb"},
+		{DistributionDebian, "aarch64", "google-chrome-stable_current_arm64.deb"},
+	}
+	for _, tc := range tests {
+		script, err := ChromeInstallScript(tc.distribution, tc.architecture)
+		if err != nil {
+			t.Fatal(err)
+		}
+		command := exec.Command("bash", "-n")
+		command.Stdin = strings.NewReader(script)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("Chrome installer is not valid Bash: %v\n%s", err, output)
+		}
+		for _, want := range []string{tc.want, "command -v google-chrome-stable", "--proto '=https'"} {
+			if !strings.Contains(script, want) {
+				t.Errorf("%s/%s Chrome installer omits %q", tc.distribution, tc.architecture, want)
+			}
+		}
+	}
+}
+
+func TestContainerRuntimeScriptsAreDistributionSpecific(t *testing.T) {
+	fedora, err := ContainerRuntimeScript(DistributionFedora)
+	if err != nil {
+		t.Fatal(err)
+	}
+	debian, err := ContainerRuntimeScript(DistributionDebian)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fedora, "KIND_EXPERIMENTAL_PROVIDER") || strings.Contains(fedora, "docker.service") {
+		t.Fatal("Fedora runtime setup is not Podman-specific")
+	}
+	for _, want := range []string{"usermod -aG docker agent", "docker info", "docker.service"} {
+		if !strings.Contains(debian, want) {
+			t.Errorf("Debian runtime setup omits %q", want)
+		}
+	}
+	if strings.Contains(debian, "podman") {
+		t.Fatal("Debian runtime setup contains Podman")
+	}
+}
+
+func TestExplicitUpgradeScriptsCoverAllRepositoriesAndGlobalNPM(t *testing.T) {
+	fedora, err := PackageUpgradeScript(DistributionFedora)
+	if err != nil {
+		t.Fatal(err)
+	}
+	debian, err := PackageUpgradeScript(DistributionDebian)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fedora, "dnf upgrade --refresh -y") || !strings.Contains(debian, "apt-get full-upgrade -y") {
+		t.Fatal("package upgrade scripts do not perform full repository upgrades")
+	}
+	npm := GlobalNPMUpgradeScript()
+	for _, want := range []string{"npm ls --global", "(.dependencies // {}) | keys[]", `"${package}@latest"`} {
+		if !strings.Contains(npm, want) {
+			t.Errorf("global npm upgrade omits %q", want)
+		}
 	}
 }

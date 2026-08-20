@@ -124,7 +124,7 @@ func (a *App) lifecycleCommand(action string) *cobra.Command {
 						opErr = p.Start(cmd.Context(), c.VMName)
 					}
 					if opErr == nil {
-						opErr = p.RefreshAgentInstructions(cmd.Context(), c.VMName, a.agentInstructions)
+						opErr = p.RefreshAgentInstructions(cmd.Context(), c.VMName, a.agentInstructions.For(value.Distribution))
 					}
 					if opErr == nil {
 						opErr = p.SyncProfile(cmd.Context(), a.backendSpec(c, value.Distribution, false), true)
@@ -496,6 +496,9 @@ func (a *App) upgradeCommand() *cobra.Command {
 			value, err := store.Load(c.VMName)
 			if err != nil {
 				return err
+			}
+			if value.Lifecycle != model.StatusRunning {
+				return fmt.Errorf("VM %s must be running before upgrade", c.VMName)
 			}
 			if err := p.SyncProfile(cmd.Context(), a.backendSpec(c, value.Distribution, false), false); err != nil {
 				return fmt.Errorf("sync persistent profile before upgrade: %w", err)
