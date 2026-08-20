@@ -289,6 +289,10 @@ func (l Lima) Upgrade(ctx context.Context, name string, spec Spec) error {
 	if err != nil {
 		return err
 	}
+	kindCleanup, err := provision.KindCleanupScript(spec.Distribution)
+	if err != nil {
+		return err
+	}
 	orcaInstall, err := releases.OrcaLatestInstallScript(spec.Distribution, spec.Architecture)
 	if err != nil {
 		return err
@@ -306,9 +310,12 @@ func (l Lima) Upgrade(ctx context.Context, name string, spec Spec) error {
 		{"distribution setup", distributionSetup},
 		{"package upgrade", packageUpgrade},
 		{"Chrome installation", chromeInstall},
+		{"kind removal", kindCleanup},
 		{"container runtime setup", containerRuntime},
+		{"k3s and Cilium upgrade", provision.K3sCiliumScript("upgrade")},
 		{"coding-agent upgrade", provision.CodingAgentsScript(spec.Config.Skills)},
 		{"global npm upgrade", provision.GlobalNPMUpgradeScript()},
+		{"Playwright reconciliation", provision.PlaywrightReconcileScript()},
 		{"Orca upgrade", orcaInstall},
 		{"Orca skills upgrade", provision.OrcaSkillsScript()},
 	}

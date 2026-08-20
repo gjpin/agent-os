@@ -28,12 +28,12 @@ podman podman-docker buildah skopeo
 dnf-plugins-core rpm-build rpmdevtools redhat-rpm-config
 autoconf automake libtool m4 ccache
 valgrind perf psmisc sysstat
-socat tcpdump traceroute
+socat sudo tcpdump traceroute
 acl attr entr inotify-tools
 python3-pip pipx
 direnv tmux
 moreutils parallel gnupg2 man-db man-pages
-kubernetes1.36-client helm kind kustomize opentofu
+kubernetes1.36-client helm kustomize opentofu
 `)
 	sort.Strings(want)
 	got := BaselinePackages()
@@ -269,8 +269,13 @@ func TestCodingAgentsScriptContainsRequiredInstallersAndSafetyControls(t *testin
 		"--no-modify-path",
 		"--global --ignore-scripts",
 		"chrome-devtools-mcp@latest skills@latest",
+		"@playwright/test@latest @playwright/cli@latest",
+		"playwright install chromium",
+		"playwright-cli install-browser chromium",
+		"playwright-cli install --skills",
+		"playwright-cli install --skills=agents",
 		"run_as_agent skills add 'https://github.com/ChromeDevTools/chrome-devtools-mcp/tree/main/skills/chrome-devtools-cli' --global --copy --agent cline --yes",
-		"for executable in chrome-devtools chrome-devtools-mcp",
+		"for executable in chrome-devtools chrome-devtools-mcp playwright playwright-cli",
 		"find \"$HOME/.agents/skills\" -name SKILL.md",
 		"command -v \"$1\"",
 		"grep -Fqx \"$path_line\"",
@@ -375,7 +380,11 @@ func TestChromeDevToolsScriptIsRepeatableAndUsesGuestOwnedPaths(t *testing.T) {
 		t.Fatalf("Chrome DevTools installer is not valid Bash: %v\n%s", err, output)
 	}
 	for _, expected := range []string{
-		"--prefix \"$agent_home/.local\" chrome-devtools-mcp@latest skills@latest",
+		"chrome-devtools-mcp@latest skills@latest",
+		"@playwright/test@latest @playwright/cli@latest",
+		"playwright install chromium",
+		"playwright-cli install-browser chromium",
+		"playwright-cli install --skills=agents",
 		"$agent_home/.agents/skills",
 		custom,
 		"--global --copy --agent cline --yes",
@@ -422,41 +431,81 @@ func TestOrcaSkillsScriptInstallsSharedSkillsIdempotently(t *testing.T) {
 	}
 }
 
-func TestKindPodmanScriptContainsRootlessPrerequisites(t *testing.T) {
-	script := KindPodmanScript()
+func TestPodmanRuntimeScriptContainsRootlessPrerequisites(t *testing.T) {
+	script := PodmanRuntimeScript()
 	command := exec.Command("bash", "-n")
 	command.Stdin = strings.NewReader(script)
 	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("kind Podman setup is not valid Bash: %v\n%s", err, output)
+		t.Fatalf("Podman setup is not valid Bash: %v\n%s", err, output)
 	}
 	for _, expected := range []string{
 		"set -euo pipefail",
-		"$agent_home/.config/containers/containers.conf.d/agent-os-kind.conf",
-		`log_driver = "k8s-file"`,
-		"pids_limit = 65536",
-		"ip6_tables\nip6table_nat\nip_tables\niptable_nat",
-		`modprobe "$module"`,
-		"fs.inotify.max_user_watches = 524288",
-		"fs.inotify.max_user_instances = 512",
-		"sysctl --system",
-		"/etc/systemd/system/user@.service.d/agent-os-kind.conf",
+		"/etc/systemd/system/user@.service.d/agent-os-podman.conf",
 		"Delegate=yes",
 		`loginctl enable-linger "$agent_user"`,
 		`systemctl start "user@$agent_uid.service"`,
-		`export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$user_uid}"`,
-		`export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"`,
-		`export KIND_EXPERIMENTAL_PROVIDER="${KIND_EXPERIMENTAL_PROVIDER:-podman}"`,
-		"/usr/bin/systemd-run --user --scope --quiet",
-		"--property=Delegate=yes -- /usr/bin/kind \"$@\"",
 		`test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs`,
-		"/usr/bin/kind /usr/bin/podman",
+		"/usr/bin/podman /usr/bin/systemd-run",
 	} {
 		if !strings.Contains(script, expected) {
-			t.Errorf("kind Podman setup omits %q", expected)
+			t.Errorf("Podman setup omits %q", expected)
 		}
 	}
-	if strings.Contains(script, "net.ipv4.ip_unprivileged_port_start") || strings.Contains(script, "kernel.dmesg_restrict") {
-		t.Fatal("kind Podman setup relaxes an excluded sysctl")
+	if strings.Contains(script, "kind") {
+		t.Fatal("Podman setup retains kind-specific configuration")
+	}
+}
+
+func TestK3sCiliumScriptCreatesReadyClusterWithNarrowAgentAccess(t *testing.T) {
+	for _, action := range []string{"create", "upgrade"} {
+		script := K3sCiliumScript(action)
+		command := exec.Command("bash", "-n")
+		command.Stdin = strings.NewReader(script)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("k3s/Cilium %s script is not valid Bash: %v\n%s", action, err, output)
+		}
+		for _, expected := range []string{
+			"flannel-backend: none",
+			"disable-network-policy: true",
+			"write-kubeconfig-mode: \"0600\"",
+			"https://get.k3s.io",
+			"INSTALL_K3S_CHANNEL=stable",
+			"https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt",
+			"sha256sum --check",
+			"x86_64) cli_arch=amd64",
+			"aarch64|arm64) cli_arch=arm64",
+			"cilium install --set operator.replicas=1",
+			"cilium upgrade --set operator.replicas=1",
+			"cilium status --wait",
+			"kubectl wait --for=condition=Ready node --all --timeout=5m",
+			"install -o \"$agent_user\" -g \"$agent_user\" -m 0600",
+			"agent-os-k3s create, /usr/local/bin/agent-os-k3s reset, /usr/local/bin/agent-os-k3s delete",
+			"visudo -cf /etc/sudoers.d/agent-os-k3s",
+		} {
+			if !strings.Contains(script, expected) {
+				t.Errorf("k3s/Cilium %s script omits %q", action, expected)
+			}
+		}
+		if strings.Contains(script, "NOPASSWD: /usr/local/bin/agent-os-k3s upgrade") {
+			t.Fatal("agent receives permission to upgrade k3s outside agent-os")
+		}
+	}
+}
+
+func TestKindCleanupScriptsRemoveOnlyLegacyKindSupport(t *testing.T) {
+	for _, tc := range []struct {
+		distribution   Distribution
+		packageCommand string
+	}{{DistributionFedora, "dnf remove -y kind"}, {DistributionDebian, "apt-get remove -y kind"}} {
+		script, err := KindCleanupScript(tc.distribution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, expected := range []string{tc.packageCommand, "/usr/local/bin/kind", "agent-os-kind.conf"} {
+			if !strings.Contains(script, expected) {
+				t.Errorf("%s kind cleanup omits %q", tc.distribution, expected)
+			}
+		}
 	}
 }
 
@@ -498,7 +547,7 @@ func TestContainerRuntimeScriptsAreDistributionSpecific(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(fedora, "KIND_EXPERIMENTAL_PROVIDER") || strings.Contains(fedora, "docker.service") {
+	if !strings.Contains(fedora, "agent-os-podman.conf") || strings.Contains(fedora, "docker.service") || strings.Contains(fedora, "kind") {
 		t.Fatal("Fedora runtime setup is not Podman-specific")
 	}
 	for _, want := range []string{"usermod -aG docker agent", "docker info", "docker.service"} {
@@ -527,6 +576,17 @@ func TestExplicitUpgradeScriptsCoverAllRepositoriesAndGlobalNPM(t *testing.T) {
 	for _, want := range []string{"npm ls --global", "(.dependencies // {}) | keys[]", `"${package}@latest"`} {
 		if !strings.Contains(npm, want) {
 			t.Errorf("global npm upgrade omits %q", want)
+		}
+	}
+	playwright := PlaywrightReconcileScript()
+	command := exec.Command("bash", "-n")
+	command.Stdin = strings.NewReader(playwright)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Playwright reconciliation is not valid Bash: %v\n%s", err, output)
+	}
+	for _, want := range []string{"playwright install chromium", "playwright-cli install-browser chromium", "playwright-cli install --skills", "playwright-cli install --skills=agents"} {
+		if !strings.Contains(playwright, want) {
+			t.Errorf("Playwright reconciliation omits %q", want)
 		}
 	}
 }

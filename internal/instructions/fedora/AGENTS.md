@@ -31,6 +31,13 @@
 - Use the same final runtime image architecture and configuration in CI validation that will be deployed to production whenever practical.
 - If a project cannot use a Distroless runtime image because of a concrete technical requirement, document the reason in the repository and use the smallest compatible runtime image instead.
 
+## Kubernetes
+
+- A ready single-node k3s cluster with Cilium as its CNI is available locally. Use `kubectl` and the default kubeconfig at `$HOME/.kube/config` for Kubernetes work.
+- When a Kubernetes-related task warrants a fresh local cluster, create it with `sudo agent-os-k3s create` or recreate it with `sudo agent-os-k3s reset`.
+- `reset` and `delete` permanently remove local cluster workloads and state. Use them only when the task requires it and losing the existing cluster state is acceptable.
+- Delete the local cluster with `sudo agent-os-k3s delete` only when the task explicitly warrants removing it.
+
 ## Packages and Applications
 
 - If a package or application is added to agent-os provisioning, implement and test its installation on both Fedora and Debian, including architecture-specific handling where required.
@@ -124,4 +131,3 @@ Do not use both tools merely because both can perform a particular browser actio
 
 - **Interact / exercise / verify / test a flow → Playwright CLI**
 - **Inspect / diagnose / profile / analyze browser internals → Chrome DevTools CLI**
-

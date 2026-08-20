@@ -25,6 +25,10 @@ const (
 	ProfileSyncPath                = "/usr/local/libexec/agent-os-profile-sync"
 	ProfileSetupPath               = "/usr/local/libexec/agent-os-profile-setup"
 	ProfileRestoreServicePath      = "/etc/systemd/system/agent-os-profile-restore.service"
+	K3sHelperPath                  = "/usr/local/bin/agent-os-k3s"
+	K3sConfigPath                  = "/etc/rancher/k3s/config.yaml"
+	K3sSystemKubeconfigPath        = "/etc/rancher/k3s/k3s.yaml"
+	K3sAgentKubeconfigPath         = "/home/agent/.kube/config"
 	DefaultChromeDevToolsSkillURL  = "https://github.com/ChromeDevTools/chrome-devtools-mcp/tree/main/skills/chrome-devtools-cli"
 )
 
@@ -128,12 +132,22 @@ run_as_agent() {
 }
 
 run_as_agent /usr/bin/npm install --global --ignore-scripts \
-  --prefix "$agent_home/.local" chrome-devtools-mcp@latest skills@latest
+  --prefix "$agent_home/.local" \
+  chrome-devtools-mcp@latest skills@latest \
+  @playwright/test@latest @playwright/cli@latest
 ` + renderSkillInstallCommands(skills) + `
-for executable in chrome-devtools chrome-devtools-mcp; do
+run_as_agent /usr/bin/env PLAYWRIGHT_BROWSERS_PATH="$agent_home/.cache/ms-playwright" \
+  playwright install chromium
+run_as_agent /usr/bin/env PLAYWRIGHT_BROWSERS_PATH="$agent_home/.cache/ms-playwright" \
+  playwright-cli install-browser chromium
+run_as_agent playwright-cli install --skills
+run_as_agent playwright-cli install --skills=agents
+for executable in chrome-devtools chrome-devtools-mcp playwright playwright-cli; do
   run_as_agent /bin/sh -c 'resolved=$(command -v "$1") && test -x "$resolved"' sh "$executable"
 done
 run_as_agent /bin/sh -c 'test -n "$(find "$HOME/.agents/skills" -name SKILL.md -print -quit)"'
+run_as_agent /bin/sh -c 'test -f "$HOME/.agents/skills/playwright-cli/SKILL.md"'
+run_as_agent /bin/sh -c 'test -f "$HOME/.claude/skills/playwright-cli/SKILL.md"'
 `
 }
 
@@ -178,12 +192,49 @@ func invalidProvisionScript(err error) string {
 func chromeDevToolsInstallBlock(skills []string) string {
 	return `
 run_as_agent /usr/bin/npm install --global --ignore-scripts \
-  --prefix "$agent_home/.local" chrome-devtools-mcp@latest skills@latest
+  --prefix "$agent_home/.local" \
+  chrome-devtools-mcp@latest skills@latest \
+  @playwright/test@latest @playwright/cli@latest
 ` + renderSkillInstallCommands(skills) + `
-for executable in chrome-devtools chrome-devtools-mcp; do
+run_as_agent /usr/bin/env PLAYWRIGHT_BROWSERS_PATH="$agent_home/.cache/ms-playwright" \
+  playwright install chromium
+run_as_agent /usr/bin/env PLAYWRIGHT_BROWSERS_PATH="$agent_home/.cache/ms-playwright" \
+  playwright-cli install-browser chromium
+run_as_agent playwright-cli install --skills
+run_as_agent playwright-cli install --skills=agents
+for executable in chrome-devtools chrome-devtools-mcp playwright playwright-cli; do
   run_as_agent /bin/sh -c 'resolved=$(command -v "$1") && test -x "$resolved"' sh "$executable"
 done
 run_as_agent /bin/sh -c 'test -n "$(find "$HOME/.agents/skills" -name SKILL.md -print -quit)"'
+run_as_agent /bin/sh -c 'test -f "$HOME/.agents/skills/playwright-cli/SKILL.md"'
+run_as_agent /bin/sh -c 'test -f "$HOME/.claude/skills/playwright-cli/SKILL.md"'
+`
+}
+
+// PlaywrightReconcileScript refreshes Playwright's managed Chromium builds and
+// bundled skills after the global npm packages have been upgraded.
+func PlaywrightReconcileScript() string {
+	return `#!/bin/bash
+set -euo pipefail
+
+readonly agent_home=/home/agent
+readonly managed_path=/home/agent/.local/bin:/home/agent/.opencode/bin:/usr/local/bin:/usr/bin:/bin
+
+cd "$agent_home"
+run_as_agent() {
+  /usr/sbin/runuser --user agent -- /usr/bin/env \
+    HOME="$agent_home" SHELL=/bin/bash PATH="$managed_path" \
+    CODEX_HOME="$agent_home/.codex" COPILOT_HOME="$agent_home/.copilot" "$@"
+}
+
+run_as_agent /usr/bin/env PLAYWRIGHT_BROWSERS_PATH="$agent_home/.cache/ms-playwright" \
+  playwright install chromium
+run_as_agent /usr/bin/env PLAYWRIGHT_BROWSERS_PATH="$agent_home/.cache/ms-playwright" \
+  playwright-cli install-browser chromium
+run_as_agent playwright-cli install --skills
+run_as_agent playwright-cli install --skills=agents
+run_as_agent /bin/sh -c 'test -f "$HOME/.agents/skills/playwright-cli/SKILL.md"'
+run_as_agent /bin/sh -c 'test -f "$HOME/.claude/skills/playwright-cli/SKILL.md"'
 `
 }
 
@@ -232,12 +283,12 @@ podman podman-docker buildah skopeo
 dnf-plugins-core rpm-build rpmdevtools redhat-rpm-config
 autoconf automake libtool m4 ccache
 valgrind perf psmisc sysstat
-socat tcpdump traceroute
+socat sudo tcpdump traceroute
 acl attr entr inotify-tools
 python3-pip pipx
 direnv tmux
 moreutils parallel gnupg2 man-db man-pages
-kubernetes1.36-client helm kind kustomize opentofu
+kubernetes1.36-client helm kustomize opentofu
 `)
 
 var debianPackageReplacements = map[string][]string{
@@ -624,6 +675,9 @@ for profile in "$agent_home/.bash_profile" "$agent_home/.bashrc"; do
   if ! grep -Fqx 'export COPILOT_HOME="$HOME/.copilot"' "$profile"; then
     printf '%s\n' 'export COPILOT_HOME="$HOME/.copilot"' >> "$profile"
   fi
+  if ! grep -Fqx 'export KUBECONFIG="$HOME/.kube/config"' "$profile"; then
+    printf '%s\n' 'export KUBECONFIG="$HOME/.kube/config"' >> "$profile"
+  fi
 done
 
 install -d -o root -g root -m 0755 /var/lib/agent-os
@@ -632,84 +686,36 @@ chmod 0644 "$ready_marker"
 `
 }
 
-// KindPodmanScript returns the root-run, idempotent setup for running kind with
+// PodmanRuntimeScript returns the root-run, idempotent setup for running
 // rootless Podman as the unprivileged agent user.
-func KindPodmanScript() string {
+func PodmanRuntimeScript() string {
 	return `#!/bin/bash
 set -euo pipefail
 
 readonly agent_user=agent
-readonly agent_home=/home/agent
 agent_uid="$(id -u "$agent_user")"
 readonly agent_uid
 
-install -d -o "$agent_user" -g "$agent_user" -m 0755 \
-  "$agent_home/.config" \
-  "$agent_home/.config/containers" \
-  "$agent_home/.config/containers/containers.conf.d"
-cat > "$agent_home/.config/containers/containers.conf.d/agent-os-kind.conf" <<'AGENT_OS_KIND_CONTAINERS'
-[containers]
-log_driver = "k8s-file"
-pids_limit = 65536
-AGENT_OS_KIND_CONTAINERS
-chown "$agent_user:$agent_user" \
-  "$agent_home/.config/containers/containers.conf.d/agent-os-kind.conf"
-chmod 0644 "$agent_home/.config/containers/containers.conf.d/agent-os-kind.conf"
-
-cat > /etc/modules-load.d/agent-os-kind.conf <<'AGENT_OS_KIND_MODULES'
-ip6_tables
-ip6table_nat
-ip_tables
-iptable_nat
-AGENT_OS_KIND_MODULES
-chmod 0644 /etc/modules-load.d/agent-os-kind.conf
-while read -r module; do
-  modprobe "$module"
-done < /etc/modules-load.d/agent-os-kind.conf
-
-cat > /etc/sysctl.d/90-agent-os-kind.conf <<'AGENT_OS_KIND_SYSCTLS'
-fs.inotify.max_user_watches = 524288
-fs.inotify.max_user_instances = 512
-AGENT_OS_KIND_SYSCTLS
-chmod 0644 /etc/sysctl.d/90-agent-os-kind.conf
-sysctl --system
-
 install -d -o root -g root -m 0755 /etc/systemd/system/user@.service.d
-cat > /etc/systemd/system/user@.service.d/agent-os-kind.conf <<'AGENT_OS_KIND_DELEGATION'
+cat > /etc/systemd/system/user@.service.d/agent-os-podman.conf <<'AGENT_OS_PODMAN_DELEGATION'
 [Service]
 Delegate=yes
-AGENT_OS_KIND_DELEGATION
-chmod 0644 /etc/systemd/system/user@.service.d/agent-os-kind.conf
+AGENT_OS_PODMAN_DELEGATION
+chmod 0644 /etc/systemd/system/user@.service.d/agent-os-podman.conf
 loginctl enable-linger "$agent_user"
 systemctl daemon-reload
 systemctl start "user@$agent_uid.service"
 systemctl is-active --quiet "user@$agent_uid.service"
 
-cat > /usr/local/bin/kind <<'AGENT_OS_KIND_LAUNCHER'
-#!/bin/bash
-set -euo pipefail
-
-user_uid="$(id -u)"
-readonly user_uid
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$user_uid}"
-export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
-export KIND_EXPERIMENTAL_PROVIDER="${KIND_EXPERIMENTAL_PROVIDER:-podman}"
-
-exec /usr/bin/systemd-run --user --scope --quiet \
-  --property=Delegate=yes -- /usr/bin/kind "$@"
-AGENT_OS_KIND_LAUNCHER
-chown root:root /usr/local/bin/kind
-chmod 0755 /usr/local/bin/kind
-
 test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
-for executable in /usr/bin/kind /usr/bin/podman /usr/bin/systemd-run /usr/local/bin/kind; do
+for executable in /usr/bin/podman /usr/bin/systemd-run; do
   test -x "$executable"
 done
 `
 }
 
-// KindDockerScript validates Docker CE and kind for the unprivileged agent.
-func KindDockerScript() string {
+// DockerRuntimeScript validates Docker CE for the unprivileged agent.
+func DockerRuntimeScript() string {
 	return `#!/bin/bash
 set -euo pipefail
 
@@ -717,7 +723,6 @@ groupadd --force docker
 usermod -aG docker agent
 systemctl enable --now docker.service containerd.service
 test -x /usr/bin/docker
-test -x /usr/bin/kind
 systemctl is-active --quiet docker.service
 /usr/sbin/runuser --user agent -- /usr/bin/env \
   HOME=/home/agent PATH=/home/agent/.local/bin:/home/agent/.opencode/bin:/usr/local/bin:/usr/bin:/bin \
@@ -729,12 +734,214 @@ systemctl is-active --quiet docker.service
 func ContainerRuntimeScript(distribution Distribution) (string, error) {
 	switch distribution {
 	case DistributionFedora:
-		return KindPodmanScript(), nil
+		return PodmanRuntimeScript(), nil
 	case DistributionDebian:
-		return KindDockerScript(), nil
+		return DockerRuntimeScript(), nil
 	default:
 		return "", fmt.Errorf("unsupported distro %q", distribution)
 	}
+}
+
+// KindCleanupScript removes the agent-os-owned kind installation and support
+// files from VMs created by earlier releases. Existing kind clusters are not
+// migrated; this release assumes there are no kind workloads to retain.
+func KindCleanupScript(distribution Distribution) (string, error) {
+	var removePackage string
+	switch distribution {
+	case DistributionFedora:
+		removePackage = "dnf remove -y kind || true"
+	case DistributionDebian:
+		removePackage = "apt-get remove -y kind || true"
+	default:
+		return "", fmt.Errorf("unsupported distro %q", distribution)
+	}
+	return `#!/bin/bash
+set -euo pipefail
+
+` + removePackage + `
+rm -f -- \
+  /usr/local/bin/kind \
+  /home/agent/.config/containers/containers.conf.d/agent-os-kind.conf \
+  /etc/modules-load.d/agent-os-kind.conf \
+  /etc/sysctl.d/90-agent-os-kind.conf \
+  /etc/systemd/system/user@.service.d/agent-os-kind.conf
+systemctl daemon-reload
+sysctl --system
+`, nil
+}
+
+// K3sCiliumScript installs the root-owned k3s lifecycle helper and invokes the
+// requested reconciliation action. The agent receives narrowly scoped sudo
+// access to create, reset, or delete its one local cluster; upgrades remain an
+// agent-os-only root operation.
+func K3sCiliumScript(action string) string {
+	if action != "create" && action != "upgrade" {
+		return invalidProvisionScript(fmt.Errorf("unsupported k3s reconciliation action %q", action))
+	}
+	return `#!/bin/bash
+set -euo pipefail
+
+install -d -o root -g root -m 0755 /usr/local/bin /etc/agent-os
+cat > /usr/local/bin/agent-os-k3s <<'AGENT_OS_K3S_HELPER'
+#!/bin/bash
+set -euo pipefail
+
+readonly agent_user=agent
+readonly agent_home=/home/agent
+readonly k3s_config=/etc/rancher/k3s/config.yaml
+readonly system_kubeconfig=/etc/rancher/k3s/k3s.yaml
+readonly agent_kubeconfig=/home/agent/.kube/config
+readonly managed_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH="$managed_path"
+
+write_k3s_config() {
+  install -d -o root -g root -m 0755 /etc/rancher/k3s
+  cat > "$k3s_config" <<'AGENT_OS_K3S_CONFIG'
+flannel-backend: none
+disable-network-policy: true
+write-kubeconfig-mode: "0600"
+AGENT_OS_K3S_CONFIG
+  chown root:root "$k3s_config"
+  chmod 0600 "$k3s_config"
+}
+
+download_k3s_installer() {
+  local destination=$1
+  curl --fail --silent --show-error --location \
+    --connect-timeout 15 --max-time 300 \
+    --retry 10 --retry-delay 5 --retry-max-time 300 --retry-all-errors \
+    --output "$destination" https://get.k3s.io
+  chmod 0700 "$destination"
+}
+
+install_k3s() {
+  local force_upgrade=$1
+  write_k3s_config
+  if [ "$force_upgrade" = true ] || [ ! -x /usr/local/bin/k3s ]; then
+    (
+      installer_dir=$(mktemp -d /tmp/agent-os-k3s-installer.XXXXXX)
+      readonly installer_dir
+      trap 'rm -rf -- "$installer_dir"' EXIT
+      installer="$installer_dir/install-k3s.sh"
+      readonly installer
+      download_k3s_installer "$installer"
+      INSTALL_K3S_CHANNEL=stable "$installer"
+    )
+  else
+    systemctl enable --now k3s.service
+  fi
+  systemctl is-enabled --quiet k3s.service
+  systemctl is-active --quiet k3s.service
+  ln -sfn /usr/local/bin/k3s /usr/local/bin/kubectl
+}
+
+wait_for_k3s() {
+  local attempt
+  for attempt in $(seq 1 120); do
+    if KUBECONFIG="$system_kubeconfig" /usr/local/bin/k3s kubectl get --raw=/readyz >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  systemctl status --no-pager k3s.service >&2 || true
+  return 1
+}
+
+publish_kubeconfig() {
+  local staged_kubeconfig
+  staged_kubeconfig=$(mktemp /run/agent-os-kubeconfig.XXXXXX)
+  trap 'rm -f -- "$staged_kubeconfig"' RETURN
+  install -o "$agent_user" -g "$agent_user" -m 0600 "$system_kubeconfig" "$staged_kubeconfig"
+  /usr/sbin/runuser --user "$agent_user" -- /usr/bin/install -d -m 0700 "$agent_home/.kube"
+  /usr/sbin/runuser --user "$agent_user" -- /usr/bin/install -m 0600 "$staged_kubeconfig" "$agent_kubeconfig"
+  rm -f -- "$staged_kubeconfig"
+  trap - RETURN
+}
+
+install_cilium_cli() {
+  local cli_version cli_arch archive
+  cli_version=$(curl --fail --silent --show-error --location \
+    https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
+  case "$(uname -m)" in
+    x86_64) cli_arch=amd64 ;;
+    aarch64|arm64) cli_arch=arm64 ;;
+    *) echo "unsupported Cilium CLI architecture: $(uname -m)" >&2; return 1 ;;
+  esac
+  archive="cilium-linux-${cli_arch}.tar.gz"
+  (
+    installer_dir=$(mktemp -d /tmp/agent-os-cilium-cli.XXXXXX)
+    readonly installer_dir
+    trap 'rm -rf -- "$installer_dir"' EXIT
+    curl --fail --silent --show-error --location --retry 5 \
+      --output "$installer_dir/$archive" \
+      "https://github.com/cilium/cilium-cli/releases/download/${cli_version}/${archive}"
+    curl --fail --silent --show-error --location --retry 5 \
+      --output "$installer_dir/$archive.sha256sum" \
+      "https://github.com/cilium/cilium-cli/releases/download/${cli_version}/${archive}.sha256sum"
+    (cd "$installer_dir" && sha256sum --check "$archive.sha256sum")
+    tar -xzf "$installer_dir/$archive" -C /usr/local/bin cilium
+  )
+  chown root:root /usr/local/bin/cilium
+  chmod 0755 /usr/local/bin/cilium
+}
+
+reconcile_cilium() {
+  local mode=$1
+  export KUBECONFIG="$system_kubeconfig"
+  if helm status cilium --namespace kube-system >/dev/null 2>&1; then
+    if [ "$mode" = upgrade ]; then
+      cilium upgrade --set operator.replicas=1
+    fi
+  else
+    cilium install --set operator.replicas=1
+  fi
+  cilium status --wait
+  /usr/local/bin/k3s kubectl wait --for=condition=Ready node --all --timeout=5m
+}
+
+create_cluster() {
+  install_k3s false
+  wait_for_k3s
+  publish_kubeconfig
+  install_cilium_cli
+  reconcile_cilium create
+}
+
+upgrade_cluster() {
+  install_k3s true
+  wait_for_k3s
+  publish_kubeconfig
+  install_cilium_cli
+  reconcile_cilium upgrade
+}
+
+delete_cluster() {
+  if [ -x /usr/local/bin/k3s-uninstall.sh ]; then
+    /usr/local/bin/k3s-uninstall.sh
+  fi
+  rm -f -- "$agent_kubeconfig"
+}
+
+case "${1:-}" in
+  create) create_cluster ;;
+  upgrade) upgrade_cluster ;;
+  reset) delete_cluster; create_cluster ;;
+  delete) delete_cluster ;;
+  *) echo 'usage: agent-os-k3s create|upgrade|reset|delete' >&2; exit 2 ;;
+esac
+AGENT_OS_K3S_HELPER
+chown root:root /usr/local/bin/agent-os-k3s
+chmod 0755 /usr/local/bin/agent-os-k3s
+
+cat > /etc/sudoers.d/agent-os-k3s <<'AGENT_OS_K3S_SUDOERS'
+agent ALL=(root) NOPASSWD: /usr/local/bin/agent-os-k3s create, /usr/local/bin/agent-os-k3s reset, /usr/local/bin/agent-os-k3s delete
+AGENT_OS_K3S_SUDOERS
+chown root:root /etc/sudoers.d/agent-os-k3s
+chmod 0440 /etc/sudoers.d/agent-os-k3s
+visudo -cf /etc/sudoers.d/agent-os-k3s
+
+/usr/local/bin/agent-os-k3s ` + action + `
+`
 }
 
 // PackageUpgradeScript upgrades every package from configured repositories.
@@ -984,6 +1191,7 @@ var executableMap = map[string]string{
 	"ripgrep":      "rg",
 	"fd-find":      "fd",
 	"tmux":         "tmux",
+	"sudo":         "sudo",
 	"vim-enhanced": "vim",
 }
 

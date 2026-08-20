@@ -94,6 +94,8 @@ func TestAgentOSE2E(t *testing.T) {
 	h.mustCLI(t, e2eCommandTimeout, "verify", h.vmName)
 	h.waitForHostPort(t)
 	h.assertGuestHealth(t)
+	h.mustResetK3s(t)
+	h.assertGuestHealth(t)
 	h.mustCLI(t, e2eCommandTimeout, "upgrade", "--yes", h.vmName)
 	h.waitForHostPort(t)
 	h.assertGuestHealth(t)
@@ -416,6 +418,17 @@ func (h *harness) mustWriteSentinel(t *testing.T) {
 	t.Helper()
 	if err := h.execGuestAgent(guestSentinelWriteScript()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func (h *harness) mustResetK3s(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	err := h.provider.ExecAsUser(ctx, h.vmName, "agent", []string{"sudo", "-n", provision.K3sHelperPath, "reset"}, nil, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("reset guest k3s cluster: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 	}
 }
 
@@ -805,6 +818,23 @@ func guestRootHealthScript(distribution model.Distribution, orcaPort int, guestK
 	}
 	b.WriteString("\n")
 	b.WriteString(`test -x /usr/bin/orca
+! command -v kind >/dev/null 2>&1
+test -x /usr/local/bin/k3s
+test -x /usr/local/bin/cilium
+test -x /usr/local/bin/agent-os-k3s
+test -f /etc/rancher/k3s/config.yaml
+grep -Fxq 'flannel-backend: none' /etc/rancher/k3s/config.yaml
+grep -Fxq 'disable-network-policy: true' /etc/rancher/k3s/config.yaml
+test -f /etc/rancher/k3s/k3s.yaml
+test -f /home/agent/.kube/config
+test "$(stat -c '%a' /home/agent/.kube/config)" = 600
+test "$(stat -c '%U:%G' /home/agent/.kube/config)" = agent:agent
+test "$(stat -c '%a' /etc/sudoers.d/agent-os-k3s)" = 440
+visudo -cf /etc/sudoers.d/agent-os-k3s
+systemctl is-enabled --quiet k3s.service
+systemctl is-active --quiet k3s.service
+KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl wait --for=condition=Ready node --all --timeout=2m
+KUBECONFIG=/etc/rancher/k3s/k3s.yaml cilium status --wait
 test -f /etc/agent-os/firewall.rules
 test -f /etc/systemd/system/orca.service
 test -f /etc/systemd/system/agent-os-firewall.service
@@ -858,7 +888,6 @@ fi
 systemctl is-enabled --quiet docker.service
 systemctl is-active --quiet docker.service
 id -nG agent | tr ' ' '\n' | grep -Fxq docker
-test -x /usr/bin/kind
 `)
 	} else {
 		b.WriteString(`rpm -q -- google-chrome-stable podman podman-docker buildah skopeo
@@ -874,10 +903,8 @@ printf '%s\n' "$delegate" | grep -Eiq '^(yes|true)$'
 linger="$(loginctl show-user agent --property=Linger --value)"
 printf '%s\n' "$linger" | grep -Eiq '^(yes|true)$'
 test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
-test -x /usr/local/bin/kind
-grep -Fq 'KIND_EXPERIMENTAL_PROVIDER' /usr/local/bin/kind
-grep -Fq 'log_driver = "k8s-file"' /home/agent/.config/containers/containers.conf.d/agent-os-kind.conf
-grep -Fq 'pids_limit = 65536' /home/agent/.config/containers/containers.conf.d/agent-os-kind.conf
+test -f /etc/systemd/system/user@.service.d/agent-os-podman.conf
+grep -Fxq 'Delegate=yes' /etc/systemd/system/user@.service.d/agent-os-podman.conf
 `)
 	}
 	b.WriteString("test -f /home/agent/.agent-os/AGENTS.md\n")
@@ -901,6 +928,26 @@ test "$COPILOT_HOME" = /home/agent/.copilot
 	b.WriteString(`test -f "$CODEX_HOME/config.toml"
 grep -Eq '^[[:space:]]*cli_auth_credentials_store[[:space:]]*=[[:space:]]*"file"[[:space:]]*$' "$CODEX_HOME/config.toml"
 test -n "$(find "$HOME/.agents/skills" -type f -name SKILL.md -print -quit)"
+test -f "$HOME/.agents/skills/playwright-cli/SKILL.md"
+test -f "$HOME/.claude/skills/playwright-cli/SKILL.md"
+test -f "$HOME/.kube/config"
+kubectl get nodes
+kubectl get pods --all-namespaces
+kubectl get pods --namespace kube-system --selector k8s-app=cilium --output name | grep -q '^pod/'
+kubectl wait --for=condition=Ready node --all --timeout=2m
+cilium status --wait
+sudo -n /usr/local/bin/agent-os-k3s create
+if sudo -n true >/dev/null 2>&1; then
+  echo 'agent unexpectedly has unrestricted passwordless sudo' >&2
+  exit 1
+fi
+browser_dir=$(mktemp -d /tmp/agent-os-playwright-e2e.XXXXXX)
+trap 'rm -rf -- "$browser_dir"' EXIT
+PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" playwright screenshot about:blank "$browser_dir/playwright.png"
+test -s "$browser_dir/playwright.png"
+PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" playwright-cli -s=agent-os-e2e open about:blank
+PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" playwright-cli -s=agent-os-e2e snapshot >/dev/null
+PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" playwright-cli -s=agent-os-e2e close
 `)
 	if distribution == model.DistributionDebian {
 		b.WriteString("docker info >/dev/null\n")
@@ -975,8 +1022,8 @@ func guestExecutables(distribution model.Distribution) []string {
 	executables := provision.RequiredExecutables(provision.BaselinePackages(distribution))
 	executables = append(executables, []string{
 		"node", "npm", "pnpm", "terraform", "tofu", "helm", "uv", "uvx", "java", "javac",
-		"kind", "opencode", "codex", "claude", "agy", "pi", "copilot", "devcontainer",
-		"google-chrome-stable", "chrome-devtools", "chrome-devtools-mcp",
+		"k3s", "kubectl", "cilium", "opencode", "codex", "claude", "agy", "pi", "copilot", "devcontainer",
+		"google-chrome-stable", "chrome-devtools", "chrome-devtools-mcp", "playwright", "playwright-cli",
 	}...)
 	if distribution == model.DistributionDebian {
 		executables = append(executables, "docker")

@@ -13,7 +13,8 @@ Virtualization.framework (`vz`) on Apple Silicon macOS.
 - Keeps agent credentials and configuration on a Lima-managed persistent disk.
 - Uses isolated plain-mode VMs with no host mounts, Lima-managed containerd, or Rosetta.
 - Uses rootless Podman in Fedora guests and Docker CE in Debian guests.
-- Includes Google Chrome Stable and the Dev Containers CLI.
+- Includes Google Chrome Stable, Playwright Test, Playwright Agent CLI, managed Chromium builds, and browser-agent skills.
+- Provides a ready single-node k3s cluster with Cilium networking and agent-controlled local cluster lifecycle commands.
 - Provides static local or WireGuard-bound forwarding to Orca.
 - Runs guest commands through `limactl shell`.
 - Supports autostart at Linux user login or macOS system boot with Lima 2.2+.

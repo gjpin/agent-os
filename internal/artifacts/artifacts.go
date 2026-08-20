@@ -104,6 +104,7 @@ func LimaYAML(def VMDefinition) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("generate container runtime setup: %w", err)
 	}
+	k3sCiliumScript := provision.K3sCiliumScript("create")
 	var b strings.Builder
 	if def.VMType != "qemu" && def.VMType != "vz" {
 		return "", fmt.Errorf("unsupported Lima VM type %q", def.VMType)
@@ -151,6 +152,9 @@ func LimaYAML(def VMDefinition) (string, error) {
 	provisioning.WriteString("cat > /run/agent-os-setup-container-runtime <<'AGENT_OS_CONTAINER_RUNTIME'\n")
 	appendIndented(&provisioning, containerRuntimeScript, "")
 	provisioning.WriteString("AGENT_OS_CONTAINER_RUNTIME\n/bin/bash /run/agent-os-setup-container-runtime\n")
+	provisioning.WriteString("cat > /run/agent-os-install-k3s-cilium <<'AGENT_OS_K3S_CILIUM'\n")
+	appendIndented(&provisioning, k3sCiliumScript, "")
+	provisioning.WriteString("AGENT_OS_K3S_CILIUM\n/bin/bash /run/agent-os-install-k3s-cilium\n")
 	provisioning.WriteString("cat > /run/agent-os-install-coding-agents <<'AGENT_OS_CODING_AGENTS'\n")
 	appendIndented(&provisioning, codingAgentsScript, "")
 	provisioning.WriteString("AGENT_OS_CODING_AGENTS\n/bin/bash /run/agent-os-install-coding-agents\n")
@@ -418,8 +422,22 @@ func firewallRules(allowedCIDRs []string, orcaPort []int) ([]string, error) {
 		"add table inet agent_os",
 		"add chain inet agent_os forward { type filter hook forward priority 0; policy drop; }",
 		"add rule inet agent_os forward ct state established,related accept",
+		"add rule inet agent_os forward iifname { \"cilium_host\", \"cilium_net\", \"cilium_vxlan\" } ip daddr { 10.42.0.0/16, 10.43.0.0/16 } accept",
+		"add rule inet agent_os forward iifname \"lxc*\" ip daddr { 10.42.0.0/16, 10.43.0.0/16 } accept",
+		"add rule inet agent_os forward oifname { \"cilium_host\", \"cilium_net\", \"cilium_vxlan\" } ip saddr { 10.42.0.0/16, 10.43.0.0/16 } accept",
+		"add rule inet agent_os forward oifname \"lxc*\" ip saddr { 10.42.0.0/16, 10.43.0.0/16 } accept",
+		"add rule inet agent_os forward iifname { \"cilium_host\", \"cilium_net\", \"cilium_vxlan\" } udp dport { 53, 67, 68, 123 } accept",
+		"add rule inet agent_os forward iifname \"lxc*\" udp dport { 53, 67, 68, 123 } accept",
+		"add rule inet agent_os forward iifname { \"cilium_host\", \"cilium_net\", \"cilium_vxlan\" } tcp dport 53 accept",
+		"add rule inet agent_os forward iifname \"lxc*\" tcp dport 53 accept",
+		"add rule inet agent_os forward iifname { \"cilium_host\", \"cilium_net\", \"cilium_vxlan\" } ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } accept",
+		"add rule inet agent_os forward iifname \"lxc*\" ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } accept",
+		"add rule inet agent_os forward iifname { \"cilium_host\", \"cilium_net\", \"cilium_vxlan\" } ip6 daddr != { ::1/128, fc00::/7, fe80::/10 } accept",
+		"add rule inet agent_os forward iifname \"lxc*\" ip6 daddr != { ::1/128, fc00::/7, fe80::/10 } accept",
 		"add chain inet agent_os output { type filter hook output priority 0; policy drop; }",
 		"add rule inet agent_os output ct state established,related accept",
+		"add rule inet agent_os output oifname { \"cilium_host\", \"cilium_net\", \"cilium_vxlan\" } ip daddr { 10.42.0.0/16, 10.43.0.0/16 } accept",
+		"add rule inet agent_os output oifname \"lxc*\" ip daddr { 10.42.0.0/16, 10.43.0.0/16 } accept",
 		"add rule inet agent_os output oifname != \"lo\" udp dport { 53, 67, 68, 123 } accept",
 		"add rule inet agent_os output oifname != \"lo\" tcp dport 53 accept",
 		"add rule inet agent_os output oifname != \"lo\" ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } accept",
@@ -428,6 +446,8 @@ func firewallRules(allowedCIDRs []string, orcaPort []int) ([]string, error) {
 		"add rule inet agent_os output oifname \"lo\" accept",
 		"add chain inet agent_os input { type filter hook input priority 0; policy drop; }",
 		"add rule inet agent_os input ct state established,related accept",
+		"add rule inet agent_os input iifname { \"cilium_host\", \"cilium_net\", \"cilium_vxlan\" } ip saddr { 10.42.0.0/16, 10.43.0.0/16 } accept",
+		"add rule inet agent_os input iifname \"lxc*\" ip saddr { 10.42.0.0/16, 10.43.0.0/16 } accept",
 		"add rule inet agent_os input iifname \"lo\" accept",
 		"add rule inet agent_os input iifname != \"lo\" udp sport 67 udp dport 68 accept",
 		"add rule inet agent_os input iifname != \"lo\" tcp dport 22 accept",
