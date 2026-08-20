@@ -49,7 +49,6 @@ var documentedAgentOSEnv = []string{
 	"AGENT_OS_WIREGUARD_ADDRESS",
 	"AGENT_OS_REPOSITORY_KEY_PATH",
 	"AGENT_OS_ALLOWED_CIDRS",
-	"AGENT_OS_RELEASE_REPOSITORY",
 	"AGENT_OS_STATE_DIR",
 	"AGENT_OS_LOG_FORMAT",
 	"AGENT_OS_PACKAGES",
@@ -66,7 +65,7 @@ func TestAgentOSE2E(t *testing.T) {
 
 	info := host.Detect()
 	if !supportedE2EHost(info) {
-		t.Skipf("real VM E2E tests are unsupported on %s/%s (%s)", info.OS, info.Architecture, info.Distribution)
+		t.Skipf("real VM E2E tests are unsupported on %s/%s", info.OS, info.Architecture)
 	}
 
 	root := moduleRoot(t)
@@ -76,11 +75,6 @@ func TestAgentOSE2E(t *testing.T) {
 	}
 
 	h := newHarness(t, root, info, string(expectedInstructions))
-	setupOutput := h.mustCLI(t, 2*time.Minute, "setup-host")
-	if got := outputField(setupOutput, "provider:"); got != info.Provider {
-		t.Fatalf("setup-host selected provider %q, want %q\n%s", got, info.Provider, setupOutput)
-	}
-	t.Logf("setup-host preflight:\n%s", strings.TrimSpace(setupOutput))
 	checkHostTools(t, info)
 	h.preflightProvider(t)
 	h.validateAndInspectConfig(t)
@@ -125,25 +119,15 @@ func TestAgentOSE2E(t *testing.T) {
 }
 
 func supportedE2EHost(info host.Info) bool {
-	if info.OS == "darwin" {
-		return info.Architecture == "arm64" && info.Provider == "lima"
-	}
-	return info.OS == "linux" && info.Provider == "libvirt" &&
-		(info.DistributionFamily == "fedora" || info.DistributionFamily == "ubuntu" ||
-			(info.DistributionFamily == "arch" && info.Architecture == "amd64"))
+	return (info.OS == "linux" && info.Architecture == "amd64") ||
+		(info.OS == "darwin" && info.Architecture == "arm64")
 }
 
 func checkHostTools(t *testing.T, info host.Info) {
 	t.Helper()
-	required := []string{}
-	if info.Provider == "lima" {
-		required = []string{"limactl"}
-	} else {
-		qemuBinary := "qemu-system-x86_64"
-		if info.Architecture == "arm64" {
-			qemuBinary = "qemu-system-aarch64"
-		}
-		required = []string{"virsh", "virt-install", qemuBinary, "qemu-img", "cloud-localds", "nft"}
+	required := []string{"limactl"}
+	if info.OS == "linux" {
+		required = append(required, "qemu-system-x86_64")
 	}
 	missing := make([]string, 0)
 	for _, name := range required {
@@ -151,17 +135,8 @@ func checkHostTools(t *testing.T, info host.Info) {
 			missing = append(missing, name)
 		}
 	}
-	if info.Provider == "libvirt" {
-		if _, err := exec.LookPath("virtnetworkd"); err != nil {
-			if _, err := exec.LookPath("libvirtd"); err != nil {
-				if _, err := exec.LookPath("virtqemud"); err != nil {
-					missing = append(missing, "virtnetworkd/libvirtd/virtqemud")
-				}
-			}
-		}
-	}
 	if len(missing) > 0 {
-		t.Fatalf("supported %s host is missing required provider tooling: %s; run setup-host --apply --yes and retry", info.Provider, strings.Join(missing, ", "))
+		t.Fatalf("supported Lima host is missing required provider tooling: %s", strings.Join(missing, ", "))
 	}
 }
 
@@ -239,7 +214,7 @@ func newHarness(t *testing.T, root string, info host.Info, instructions string) 
 	provider, err := host.Provider(info, runner, io.Discard, io.Discard)
 	if err != nil {
 		removeHarnessPaths()
-		t.Fatalf("select %s provider: %v", info.Provider, err)
+		t.Fatalf("select Lima provider: %v", err)
 	}
 
 	h := &harness{
@@ -253,7 +228,7 @@ func newHarness(t *testing.T, root string, info host.Info, instructions string) 
 		keyPath:              keyPath,
 		vmName:               vmName,
 		port:                 port,
-		providerName:         info.Provider,
+		providerName:         provider.Name(),
 		expectedInstructions: instructions,
 		env:                  env,
 		runner:               runner,
@@ -270,7 +245,7 @@ func (h *harness) preflightProvider(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	if err := h.provider.Available(ctx); err != nil {
-		t.Fatalf("%s provider tooling is unavailable after setup-host preflight: %v", h.providerName, err)
+		t.Fatalf("%s provider tooling is unavailable: %v", h.providerName, err)
 	}
 }
 
@@ -410,7 +385,7 @@ func (h *harness) waitForHostPort(t *testing.T) {
 
 func (h *harness) assertGuestHealth(t *testing.T) {
 	t.Helper()
-	if err := h.execGuestRoot(guestRootHealthScript(h.providerName, h.port, credentials.GuestKeyPath(h.keyPath), h.expectedInstructions)); err != nil {
+	if err := h.execGuestRoot(guestRootHealthScript(h.port, credentials.GuestKeyPath(h.keyPath), h.expectedInstructions)); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.execGuestAgent(guestAgentHealthScript()); err != nil {
@@ -433,22 +408,14 @@ func (h *harness) assertSentinel(t *testing.T) {
 }
 
 func (h *harness) execGuestRoot(script string) error {
-	executor, ok := h.provider.(backend.AdminExecutor)
-	if !ok {
-		return fmt.Errorf("%s provider does not expose root guest execution", h.providerName)
-	}
 	return h.execGuest(func(ctx context.Context, stdout, stderr io.Writer) error {
-		return executor.ExecAsRoot(ctx, h.vmName, []string{"/bin/bash", "-s"}, strings.NewReader(script), stdout, stderr)
+		return h.provider.ExecAsRoot(ctx, h.vmName, []string{"/bin/bash", "-s"}, strings.NewReader(script), stdout, stderr)
 	}, "root")
 }
 
 func (h *harness) execGuestAgent(script string) error {
-	executor, ok := h.provider.(backend.UserExecutor)
-	if !ok {
-		return fmt.Errorf("%s provider does not expose agent guest execution", h.providerName)
-	}
 	return h.execGuest(func(ctx context.Context, stdout, stderr io.Writer) error {
-		return executor.ExecAsUser(ctx, h.vmName, "agent", []string{"/bin/bash", "-s"}, strings.NewReader(script), stdout, stderr)
+		return h.provider.ExecAsUser(ctx, h.vmName, "agent", []string{"/bin/bash", "-s"}, strings.NewReader(script), stdout, stderr)
 	}, "agent")
 }
 
@@ -476,16 +443,6 @@ func (h *harness) assertDestroyed(t *testing.T) {
 	defer cancel()
 	var output bytes.Buffer
 	var stderr bytes.Buffer
-	if h.providerName == "libvirt" {
-		err := h.runner.Run(ctx, "virsh", []string{"--connect", "qemu:///system", "list", "--all", "--name"}, nil, &output, &stderr)
-		if err != nil {
-			t.Fatalf("confirm libvirt VM removal: %v\nstderr:\n%s", err, stderr.String())
-		}
-		if hasOutputLine(output.String(), h.vmName) {
-			t.Fatalf("libvirt domain %q still exists after purge\n%s", h.vmName, output.String())
-		}
-		return
-	}
 	err := h.runner.Run(ctx, "limactl", []string{"list", "--format", "{{.Name}}"}, nil, &output, &stderr)
 	if err != nil {
 		t.Fatalf("confirm Lima VM removal: %v\nstderr:\n%s", err, stderr.String())
@@ -762,16 +719,6 @@ func moduleRoot(t *testing.T) string {
 	}
 }
 
-func outputField(output, prefix string) string {
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, prefix) {
-			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
-		}
-	}
-	return ""
-}
-
 func hasOutputLine(output, wanted string) bool {
 	for _, line := range strings.Split(output, "\n") {
 		if strings.TrimSpace(line) == wanted {
@@ -824,7 +771,7 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
-func guestRootHealthScript(providerName string, orcaPort int, guestKeyPath, instructions string) string {
+func guestRootHealthScript(orcaPort int, guestKeyPath, instructions string) string {
 	var b strings.Builder
 	b.WriteString("#!/bin/bash\nset -euo pipefail\n")
 	b.WriteString("export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n")
@@ -834,11 +781,6 @@ func guestRootHealthScript(providerName string, orcaPort int, guestKeyPath, inst
 		fmt.Fprintf(&b, " %s", shellQuote(packageName))
 	}
 	b.WriteString("\n")
-	if providerName == "libvirt" {
-		b.WriteString("rpm -q -- qemu-guest-agent\n")
-		b.WriteString("systemctl is-enabled --quiet qemu-guest-agent.service\n")
-		b.WriteString("systemctl is-active --quiet qemu-guest-agent.service\n")
-	}
 	b.WriteString(`test -x /usr/bin/orca
 test -f /etc/agent-os/firewall.rules
 test -f /etc/systemd/system/orca.service

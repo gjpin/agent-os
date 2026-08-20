@@ -19,15 +19,24 @@ func TestDiskIDIsDeterministicAndLengthSafe(t *testing.T) {
 	}
 }
 
-func TestDiskLabelsFitExt4AndIdentifyProvider(t *testing.T) {
+func TestDiskLabelsFitExt4(t *testing.T) {
 	diskID := DiskID(strings.Repeat("a", 63))
-	lima := DiskLabel("lima", diskID)
-	libvirt := DiskLabel("libvirt", diskID)
-	if len(lima) > 16 || len(libvirt) > 16 || !validDiskLabel(lima) || !validDiskLabel(libvirt) {
-		t.Fatalf("invalid ext4 labels: Lima=%q libvirt=%q", lima, libvirt)
+	lima := DiskLabel(diskID)
+	if len(lima) > 16 || !validDiskLabel(lima) {
+		t.Fatalf("invalid ext4 label: %q", lima)
 	}
-	if !strings.HasPrefix(lima, "lima-") || !strings.HasPrefix(libvirt, "virt-") || lima == libvirt {
-		t.Fatalf("provider identity missing from labels: Lima=%q libvirt=%q", lima, libvirt)
+	if !strings.HasPrefix(lima, "agent-os-") {
+		t.Fatalf("agent-os identity missing from label: %q", lima)
+	}
+}
+
+func TestDiskLabelCompatibilityAcceptsCurrentAndPreviousLimaLabels(t *testing.T) {
+	diskID := DiskID("agents")
+	if !DiskLabelIsCompatible(diskID, DiskLabel(diskID)) || !DiskLabelIsCompatible(diskID, legacyDiskLabel(diskID)) {
+		t.Fatal("compatible profile label rejected")
+	}
+	if DiskLabelIsCompatible(diskID, "unrelated") {
+		t.Fatal("unrelated profile label accepted")
 	}
 }
 
@@ -38,11 +47,11 @@ func TestMetadataStoreUsesRestrictedAtomicFiles(t *testing.T) {
 	diskID := DiskID(name)
 	value := Metadata{
 		SchemaVersion: SchemaVersion,
-		Provider:      "libvirt",
+		Provider:      "lima",
 		DiskID:        diskID,
 		SizeGiB:       10,
 		Filesystem:    Filesystem,
-		Label:         DiskLabel("libvirt", diskID),
+		Label:         DiskLabel(diskID),
 	}
 	if err := store.Save(name, value); err != nil {
 		t.Fatal(err)
@@ -91,7 +100,7 @@ func TestMetadataStoreUsesRestrictedAtomicFiles(t *testing.T) {
 
 func TestMetadataRejectsUnexpectedFilesystemAndProvider(t *testing.T) {
 	diskID := DiskID("agents")
-	base := Metadata{SchemaVersion: SchemaVersion, Provider: "libvirt", DiskID: diskID, SizeGiB: 10, Filesystem: Filesystem, Label: DiskLabel("libvirt", diskID)}
+	base := Metadata{SchemaVersion: SchemaVersion, Provider: "lima", DiskID: diskID, SizeGiB: 10, Filesystem: Filesystem, Label: DiskLabel(diskID)}
 	for _, mutate := range []func(*Metadata){func(m *Metadata) { m.Provider = "unknown" }, func(m *Metadata) { m.Filesystem = "xfs" }, func(m *Metadata) { m.Label = "not a label" }} {
 		value := base
 		mutate(&value)

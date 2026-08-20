@@ -119,9 +119,8 @@ func TestAgentInstructionsScriptContainsAllManagedDestinations(t *testing.T) {
 
 func TestProfileSetupScriptRoutesCrossAgentState(t *testing.T) {
 	script := ProfileSetupScript(ProfileMountSpec{
-		Backend: "libvirt",
-		DiskID:  "agent-os-profile-profile-vm-1234567890abcdef",
-		Label:   "agent-os-profile-vm-1234567890abcdef",
+		DiskID: "agent-os-profile-profile-vm-1234567890abcdef",
+		Label:  "agent-os-profile-vm-1234567890abcdef",
 	})
 	for _, expected := range []string{
 		`"$profile_root/agents"`,
@@ -137,9 +136,8 @@ func TestProfileSetupScriptRoutesCrossAgentState(t *testing.T) {
 
 func TestLimaProfileSetupMountsAttachedDiskInPlainMode(t *testing.T) {
 	script := ProfileSetupScript(ProfileMountSpec{
-		Backend: "lima",
-		DiskID:  "agent-os-profile-profile-vm-1234567890abcdef",
-		Label:   "lima-agent-os-profile-profile-vm-1234567890abcdef",
+		DiskID: "agent-os-profile-profile-vm-1234567890abcdef",
+		Label:  "lima-agent-os-profile-profile-vm-1234567890abcdef",
 	})
 	for _, expected := range []string{
 		"readonly profile_device=/dev/vdb",
@@ -156,7 +154,7 @@ func TestLimaProfileSetupMountsAttachedDiskInPlainMode(t *testing.T) {
 	}
 }
 
-func TestAgentInstructionsScriptIsIdempotentAndReplacesDestinations(t *testing.T) {
+func TestAgentInstructionsScriptIsIdempotentAndPreservesDestinations(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "home", "agent")
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		t.Fatal(err)
@@ -213,20 +211,31 @@ func TestAgentInstructionsScriptIsIdempotentAndReplacesDestinations(t *testing.T
 	if string(actual) != content {
 		t.Fatalf("canonical content = %q, want %q", actual, content)
 	}
-	for _, destination := range destinations[1:] {
+	for i, destination := range destinations[1:] {
 		info, err := os.Lstat(destination)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if info.Mode()&os.ModeSymlink == 0 {
-			t.Fatalf("%s is not a symlink", destination)
-		}
-		target, err := os.Readlink(destination)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if target != canonical {
-			t.Fatalf("%s points to %q, want %q", destination, target, canonical)
+		switch (i + 1) % 3 {
+		case 0:
+			if !info.IsDir() {
+				t.Fatalf("%s directory was replaced", destination)
+			}
+		case 1:
+			if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+				t.Fatalf("%s regular file was replaced", destination)
+			}
+		case 2:
+			if info.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("%s stale link was not replaced", destination)
+			}
+			target, err := os.Readlink(destination)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if target != canonical {
+				t.Fatalf("%s points to %q, want %q", destination, target, canonical)
+			}
 		}
 	}
 }

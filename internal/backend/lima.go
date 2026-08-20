@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gjpin/agent-os/internal/artifacts"
 	"github.com/gjpin/agent-os/internal/execx"
@@ -20,10 +21,16 @@ import (
 	"github.com/gjpin/agent-os/internal/releases"
 )
 
+var provisioningTimeout = 20 * time.Minute
+
 type Lima struct {
 	Runner execx.Runner
 	Out    io.Writer
 	Err    io.Writer
+	// VMType is the host VM driver: qemu on Linux and vz on Apple Silicon.
+	// Keeping it explicit makes artifact generation independent of the runtime
+	// executing tests or embedding this provider.
+	VMType string
 }
 
 func (l Lima) Name() string { return "lima" }
@@ -43,12 +50,16 @@ func (l Lima) EnableAutostart(ctx context.Context, name string) error {
 	}
 	version, major, minor, err := l.version(ctx)
 	if err != nil {
-		return fmt.Errorf("cannot determine Lima version for boot-time autostart; install Lima 2.2 or newer: %w", err)
+		return fmt.Errorf("cannot determine Lima version for autostart; install Lima 2.2 or newer: %w", err)
 	}
 	if major < 2 || (major == 2 && minor < 2) {
-		return fmt.Errorf("Lima %s does not support boot-time autostart; upgrade to Lima 2.2 or newer and retry", version)
+		return fmt.Errorf("Lima %s does not support autostart; upgrade to Lima 2.2 or newer and retry", version)
 	}
-	return command(l.Runner, ctx, "limactl", []string{"autostart", "enable", "--condition=boot", name}, nil, l.Out, l.Err)
+	args := []string{"autostart", "enable"}
+	if l.VMType == "vz" {
+		args = append(args, "--condition=boot")
+	}
+	return command(l.Runner, ctx, "limactl", append(args, name), nil, l.Out, l.Err)
 }
 
 func (l Lima) DisableAutostart(ctx context.Context, name string) error {
@@ -89,24 +100,24 @@ func (l Lima) ConfigureForwarding(ctx context.Context, spec Spec) error {
 	if spec.Config.AccessMode != model.AccessWireGuard {
 		return nil
 	}
-	if err := command(l.Runner, ctx, "ifconfig", []string{spec.Config.WireGuardInterface}, nil, l.Out, l.Err); err != nil {
+	tool, args := "ip", []string{"link", "show", "dev", spec.Config.WireGuardInterface}
+	if l.VMType == "vz" {
+		tool, args = "ifconfig", []string{spec.Config.WireGuardInterface}
+	}
+	if err := command(l.Runner, ctx, tool, args, nil, l.Out, l.Err); err != nil {
 		return fmt.Errorf("WireGuard interface %q is unavailable: %w", spec.Config.WireGuardInterface, err)
 	}
 	return nil
 }
 
-func (l Lima) RemoveForwarding(context.Context, Spec) error { return nil }
-
-func (l Lima) EnsureNetwork(context.Context, Spec) error { return nil }
-
 func (l Lima) Create(ctx context.Context, spec Spec) error {
 	definition := artifacts.FromConfig(spec.Config, spec.Architecture)
+	definition.VMType = l.VMType
 	definition.AgentInstructions = spec.AgentInstructions
-	profileInfo, _, profileFound, err := loadProfile(spec, l.Name())
+	profileInfo, _, profileFound, err := loadProfile(spec)
 	if err != nil {
 		return err
 	}
-	definition.ProfileBackend = l.Name()
 	definition.ProfileDiskID = profileInfo.Metadata.DiskID
 	definition.ProfileDiskLabel = profileInfo.Metadata.Label
 	definition.ProfileDiskFormat = !profileFound
@@ -220,10 +231,8 @@ func (l Lima) RefreshAgentInstructions(ctx context.Context, name, content string
 	return command(l.Runner, ctx, "limactl", []string{"shell", name, "--", "sudo", "/bin/bash", "-s"}, strings.NewReader(provision.AgentInstructionsScript(content)), l.Out, l.Err)
 }
 
-func (l Lima) DetachProfile(context.Context, Spec) error { return nil }
-
 func (l Lima) PurgeProfile(ctx context.Context, spec Spec) error {
-	info, _, found, err := loadProfile(spec, l.Name())
+	info, _, found, err := loadProfile(spec)
 	if err != nil {
 		return err
 	}

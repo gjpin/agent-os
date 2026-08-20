@@ -187,17 +187,15 @@ func validateSkillURL(value string) error {
 	return nil
 }
 
-// ProfileMountSpec describes the provider-specific block-device presentation
-// without putting host paths or credentials into guest configuration.
+// ProfileMountSpec describes the Lima-managed profile disk without putting
+// host paths or credentials into guest configuration.
 type ProfileMountSpec struct {
-	Backend string
-	DiskID  string
-	Label   string
+	DiskID string
+	Label  string
 }
 
 // baselinePackages is the development and operations toolset guaranteed in
-// every newly provisioned VM. Provider-specific packages are added by the
-// provider artifact generator, while configured packages are additive extras.
+// every newly provisioned VM. Configured packages are additive extras.
 var baselinePackages = strings.Fields(`
 bash bat bats bind-utils bzip2 ca-certificates cargo chromium
 clang clang-tools-extra cmake coreutils curl diffutils fd-find file
@@ -454,9 +452,6 @@ done
 // those roots is copied into the profile disk before the old root is moved
 // aside; no personal files are silently discarded.
 func ProfileSetupScript(spec ProfileMountSpec) string {
-	if spec.Backend != "lima" && spec.Backend != "libvirt" {
-		return "#!/bin/bash\nset -eu\necho 'invalid agent-os profile backend' >&2\nexit 1\n"
-	}
 	if spec.DiskID == "" || spec.Label == "" || strings.ContainsAny(spec.DiskID+spec.Label, "'\n\r") {
 		return "#!/bin/bash\nset -eu\necho 'invalid agent-os profile identity' >&2\nexit 1\n"
 	}
@@ -466,9 +461,8 @@ func ProfileSetupScript(spec ProfileMountSpec) string {
 	b.WriteString("readonly profile_mount=/var/lib/agent-os/profile\n")
 	b.WriteString("readonly profile_root=/var/lib/agent-os/profile\n")
 	fmt.Fprintf(&b, "readonly expected_label=%s\n", shellQuote(spec.Label))
-	if spec.Backend == "lima" {
-		fmt.Fprintf(&b, "readonly profile_source=%s\n", shellQuote("/mnt/lima-"+spec.DiskID))
-		b.WriteString(`readonly profile_device=/dev/vdb
+	fmt.Fprintf(&b, "readonly profile_source=%s\n", shellQuote("/mnt/lima-"+spec.DiskID))
+	b.WriteString(`readonly profile_device=/dev/vdb
 if ! mountpoint -q "$profile_source"; then
   test -b "$profile_device"
   filesystem=$(blkid -o value -s TYPE "$profile_device" 2>/dev/null || true)
@@ -483,7 +477,7 @@ if ! mountpoint -q "$profile_source"; then
   mount -t ext4 -o nodev,nosuid "$profile_device" "$profile_source"
 fi
 `)
-		b.WriteString(`test -d "$profile_source"
+	b.WriteString(`test -d "$profile_source"
 mountpoint -q "$profile_source"
 test "$(findmnt -no FSTYPE --target "$profile_source")" = ext4
 test "$(blkid -o value -s LABEL "$profile_device")" = "$expected_label"
@@ -495,33 +489,6 @@ if ! mountpoint -q "$profile_mount"; then
 fi
 mount -o remount,bind,nodev,nosuid "$profile_mount"
 `)
-	} else {
-		fmt.Fprintf(&b, "readonly profile_device=%s\n", shellQuote("/dev/disk/by-id/virtio-"+spec.DiskID))
-		b.WriteString(`test -e "$profile_device"
-filesystem=$(blkid -o value -s TYPE "$profile_device" 2>/dev/null || true)
-if [ -z "$filesystem" ]; then
-  test -z "$(wipefs -n "$profile_device" 2>/dev/null || true)"
-  mkfs.ext4 -F -L "$expected_label" "$profile_device"
-  filesystem=ext4
-fi
-test "$filesystem" = ext4
-test "$(blkid -o value -s LABEL "$profile_device")" = "$expected_label"
-profile_uuid=$(blkid -o value -s UUID "$profile_device")
-test -n "$profile_uuid"
-install -d -o root -g root -m 0755 "$profile_mount"
-fstab_line="UUID=$profile_uuid $profile_mount ext4 nodev,nosuid 0 2"
-if grep -Fq "UUID=$profile_uuid $profile_mount" /etc/fstab; then
-  grep -Fqx "$fstab_line" /etc/fstab
-else
-  printf '%s\n' "$fstab_line" >> /etc/fstab
-fi
-if ! mountpoint -q "$profile_mount"; then
-mount "$profile_mount"
-fi
-mount -o remount,nodev,nosuid "$profile_mount"
-resize2fs "$profile_device"
-`)
-	}
 	b.WriteString(`
 install -d -o agent -g agent -m 0700 "$profile_root"
 install -d -o agent -g agent -m 0700 \
@@ -650,9 +617,6 @@ func AgentInstructionsScript(content string) string {
 }
 
 func agentInstructionsScriptAt(content, home, user, group string) string {
-	if user != "agent" || group != "agent" {
-		return legacyAgentInstructionsScriptAt(content, home, user, group)
-	}
 	canonical := path.Join(home, ".agent-os", "AGENTS.md")
 	links := []string{
 		path.Join(home, ".config", "opencode", "AGENTS.md"),
@@ -676,32 +640,6 @@ func agentInstructionsScriptAt(content, home, user, group string) string {
 		fmt.Fprintf(&b, "install -d -o %s -g %s -m 0755 %s\n", shellQuote(user), shellQuote(group), shellQuote(path.Dir(link)))
 		fmt.Fprintf(&b, "if [ -L %s ]; then\n  if [ \"$(readlink -- %s)\" != %s ]; then rm -f -- %s; fi\nelif [ -e %s ]; then\n  : # preserve unrelated personal content at this destination\nfi\n", shellQuote(link), shellQuote(link), shellQuote(canonical), shellQuote(link), shellQuote(link))
 		fmt.Fprintf(&b, "if [ ! -e %s ] && [ ! -L %s ]; then ln -s -- %s %s; fi\n\n", shellQuote(link), shellQuote(link), shellQuote(canonical), shellQuote(link))
-	}
-	return b.String()
-}
-
-// legacyAgentInstructionsScriptAt preserves the old helper contract for
-// callers that explicitly supply numeric ownership values. Production
-// provisioning always uses the safe agent/agent path above.
-func legacyAgentInstructionsScriptAt(content, home, user, group string) string {
-	canonical := path.Join(home, ".agent-os", "AGENTS.md")
-	links := []string{
-		path.Join(home, ".config", "opencode", "AGENTS.md"),
-		path.Join(home, ".codex", "AGENTS.md"),
-		path.Join(home, ".claude", "CLAUDE.md"),
-		path.Join(home, ".pi", "agent", "AGENTS.md"),
-		path.Join(home, ".copilot", "copilot-instructions.md"),
-	}
-	var b strings.Builder
-	b.WriteString("#!/bin/bash\nset -eu\n\n")
-	fmt.Fprintf(&b, "rm -rf -- %s\n", shellQuote(canonical))
-	fmt.Fprintf(&b, "install -d -o %s -g %s -m 0755 %s\n", shellQuote(user), shellQuote(group), shellQuote(path.Dir(canonical)))
-	fmt.Fprintf(&b, "printf '%%s' %s > %s\n", shellQuote(content), shellQuote(canonical))
-	fmt.Fprintf(&b, "chown %s:%s %s\nchmod 0644 %s\n\n", shellQuote(user), shellQuote(group), shellQuote(canonical), shellQuote(canonical))
-	for _, link := range links {
-		fmt.Fprintf(&b, "rm -rf -- %s\n", shellQuote(link))
-		fmt.Fprintf(&b, "install -d -o %s -g %s -m 0755 %s\n", shellQuote(user), shellQuote(group), shellQuote(path.Dir(link)))
-		fmt.Fprintf(&b, "ln -s -- %s %s\n\n", shellQuote(canonical), shellQuote(link))
 	}
 	return b.String()
 }
@@ -746,8 +684,4 @@ func InstallCommand(packages []string) []string {
 	result := []string{"dnf", "install", "-y"}
 	result = append(result, packages...)
 	return result
-}
-
-func AgentUserCloudInit() string {
-	return "name: agent\n  shell: /bin/bash\n  lock_passwd: true\n  groups: []\n  sudo: []\n"
 }

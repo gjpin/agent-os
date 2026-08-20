@@ -17,14 +17,12 @@ import (
 const SchemaVersion = 1
 
 type State struct {
-	SchemaVersion int               `json:"schema_version"`
-	Name          string            `json:"name"`
-	Provider      string            `json:"provider"`
-	BackendID     string            `json:"backend_id,omitempty"`
-	Lifecycle     model.VMStatus    `json:"lifecycle"`
-	CreatedAt     time.Time         `json:"created_at"`
-	UpdatedAt     time.Time         `json:"updated_at"`
-	Artifacts     map[string]string `json:"artifacts,omitempty"`
+	SchemaVersion int            `json:"schema_version"`
+	Name          string         `json:"name"`
+	Provider      string         `json:"provider"`
+	Lifecycle     model.VMStatus `json:"lifecycle"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
 	// Autostart is optional so state files written before VM autostart was
 	// introduced continue to decode as disabled. A nil value is equivalent to
 	// an explicitly disabled registration.
@@ -38,10 +36,6 @@ type State struct {
 type AutostartState struct {
 	Enabled bool `json:"enabled"`
 }
-
-// Autostart is retained as a concise name for callers that want to construct
-// metadata directly.
-type Autostart = AutostartState
 
 type Store struct {
 	Root string
@@ -97,6 +91,9 @@ func (s Store) Load(name string) (State, error) {
 	if value.Name != name {
 		return State{}, fmt.Errorf("state name %q does not match %q", value.Name, name)
 	}
+	if value.Provider != "lima" {
+		return State{}, fmt.Errorf("unsupported state provider %q", value.Provider)
+	}
 	return value, nil
 }
 
@@ -109,6 +106,9 @@ func (s Store) Save(value State) error {
 	}
 	if !model.VMNameIsValid(value.Name) {
 		return fmt.Errorf("invalid VM name %q", value.Name)
+	}
+	if value.Provider != "lima" {
+		return fmt.Errorf("unsupported state provider %q", value.Provider)
 	}
 	if s.Now == nil {
 		s.Now = time.Now

@@ -5,156 +5,118 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/gjpin/agent-os/internal/execx"
 	"github.com/gjpin/agent-os/internal/model"
 	"github.com/gjpin/agent-os/internal/profile"
 )
 
-func TestLibvirtProfileDiskCreatesAndGrowsWithoutShrinking(t *testing.T) {
-	stateDir := t.TempDir()
-	c := model.DefaultConfig(stateDir)
-	c.VMName = "profile-grow"
-	c.ProfileDiskGiB = 12
-	createRunner := &profileRunner{}
-	if err := ensureLibvirtProfile(context.Background(), createRunner, nil, nil, Spec{Config: c}); err != nil {
-		t.Fatal(err)
-	}
-	if len(createRunner.Calls) != 1 || createRunner.Calls[0].Name != "qemu-img" || createRunner.Calls[0].Args[0] != "create" {
-		t.Fatalf("unexpected profile creation calls: %+v", createRunner.Calls)
-	}
-	store := profile.NewStore(stateDir)
-	metadata, err := store.Load(c.VMName)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if metadata.SizeGiB != 12 {
-		t.Fatalf("metadata size = %d, want 12", metadata.SizeGiB)
-	}
-
-	c.ProfileDiskGiB = 8
-	growRunner := &profileRunner{InfoSize: 5 << 30}
-	if err := ensureLibvirtProfile(context.Background(), growRunner, nil, nil, Spec{Config: c}); err != nil {
-		t.Fatal(err)
-	}
-	if len(growRunner.Calls) != 2 || growRunner.Calls[1].Args[0] != "resize" || !strings.HasSuffix(strings.Join(growRunner.Calls[1].Args, " "), "12G") {
-		t.Fatalf("profile disk was not grown to its retained minimum: %+v", growRunner.Calls)
-	}
-	metadata, err = store.Load(c.VMName)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if metadata.SizeGiB != 12 {
-		t.Fatalf("retained metadata size = %d, want 12", metadata.SizeGiB)
-	}
+type limaDiskRunner struct {
+	diskJSON string
+	calls    []call
 }
 
-func TestLibvirtProfileRejectsProviderMismatchAndUntrustedDisk(t *testing.T) {
-	stateDir := t.TempDir()
-	c := model.DefaultConfig(stateDir)
-	c.VMName = "profile-mismatch"
-	store := profile.NewStore(stateDir)
-	diskID := profile.DiskID(c.VMName)
-	if err := store.Save(c.VMName, profile.Metadata{
-		SchemaVersion: profile.SchemaVersion,
-		Provider:      "lima",
-		DiskID:        diskID,
-		SizeGiB:       10,
-		Filesystem:    profile.Filesystem,
-		Label:         profile.DiskLabel("lima", diskID),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := ensureLibvirtProfile(context.Background(), &profileRunner{}, nil, nil, Spec{Config: c}); err == nil || !strings.Contains(err.Error(), "belongs to provider") {
-		t.Fatalf("provider mismatch was accepted: %v", err)
-	}
-
-	c.VMName = "profile-untrusted"
-	diskPath, err := store.DiskPath(c.VMName)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(diskPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(diskPath, []byte("not a trusted profile disk"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := ensureLibvirtProfile(context.Background(), &profileRunner{}, nil, nil, Spec{Config: c}); err == nil || !strings.Contains(err.Error(), "without trusted metadata") {
-		t.Fatalf("untrusted disk was accepted: %v", err)
-	}
-}
-
-func TestLimaDiskDetailsReadsJSONOutput(t *testing.T) {
-	runner := &limaProfileRunner{Output: "{\"name\":\"other\",\"size\":1073741824}\n{\"name\":\"target\",\"size\":5368709120}\n"}
-	present, size, err := limaDiskDetails(context.Background(), runner, "target", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !present || size != 5 {
-		t.Fatalf("disk details = present %v, size %d; want present true, size 5", present, size)
-	}
-	if len(runner.Calls) != 1 || runner.Calls[0].Name != "limactl" || strings.Join(runner.Calls[0].Args, " ") != "disk list --json" {
-		t.Fatalf("unexpected Lima disk inspection call: %+v", runner.Calls)
-	}
-
-	present, size, err = limaDiskDetails(context.Background(), runner, "missing", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if present || size != 0 {
-		t.Fatalf("missing disk details = present %v, size %d; want false, 0", present, size)
-	}
-}
-
-func TestLimaProfileCreatesAfterJSONDiskInspection(t *testing.T) {
-	stateDir := t.TempDir()
-	c := model.DefaultConfig(stateDir)
-	c.VMName = "lima-profile-create"
-	runner := &limaProfileRunner{}
-	if err := ensureLimaProfile(context.Background(), runner, nil, nil, Spec{Config: c}); err != nil {
-		t.Fatal(err)
-	}
-	if len(runner.Calls) != 2 {
-		t.Fatalf("unexpected Lima profile calls: %+v", runner.Calls)
-	}
-	if got := strings.Join(runner.Calls[0].Args, " "); got != "disk list --json" {
-		t.Fatalf("Lima disk inspection args = %q, want %q", got, "disk list --json")
-	}
-	wantCreate := fmt.Sprintf("disk create %s --size 10GiB --format qcow2", profile.DiskID(c.VMName))
-	if got := strings.Join(runner.Calls[1].Args, " "); got != wantCreate {
-		t.Fatalf("Lima disk creation args = %q", got)
-	}
-}
-
-type profileRunner struct {
-	Calls    []execx.Invocation
-	InfoSize int64
-}
-
-type limaProfileRunner struct {
-	Calls  []execx.Invocation
-	Output string
-}
-
-func (r *limaProfileRunner) Run(_ context.Context, name string, args []string, _ io.Reader, stdout, _ io.Writer) error {
-	r.Calls = append(r.Calls, execx.Invocation{Name: name, Args: append([]string(nil), args...)})
-	if stdout != nil && name == "limactl" && len(args) >= 2 && args[0] == "disk" && args[1] == "list" {
-		_, _ = io.WriteString(stdout, r.Output)
+func (r *limaDiskRunner) Run(_ context.Context, name string, args []string, _ io.Reader, stdout, _ io.Writer) error {
+	r.calls = append(r.calls, call{name: name, args: append([]string(nil), args...)})
+	if name == "limactl" && len(args) >= 2 && args[0] == "disk" && args[1] == "list" && stdout != nil {
+		_, _ = io.WriteString(stdout, r.diskJSON)
 	}
 	return nil
 }
 
-func (r *profileRunner) Run(_ context.Context, name string, args []string, _ io.Reader, stdout, _ io.Writer) error {
-	r.Calls = append(r.Calls, execx.Invocation{Name: name, Args: append([]string(nil), args...)})
-	if name == "qemu-img" && len(args) > 0 && args[0] == "create" {
-		return os.WriteFile(args[len(args)-1], nil, 0o600)
+func TestDecodeLimaDisks(t *testing.T) {
+	for _, data := range []string{
+		`[{"name":"profile","size":10737418240}]`,
+		`{"name":"profile","size":10737418240}` + "\n",
+	} {
+		disks, err := decodeLimaDisks([]byte(data))
+		if err != nil || len(disks) != 1 || disks[0].Name != "profile" || limaDiskSizeGiB(disks[0].Size) != 10 {
+			t.Fatalf("disks=%+v err=%v", disks, err)
+		}
 	}
-	if name == "qemu-img" && len(args) > 0 && args[0] == "info" {
-		_, _ = fmt.Fprintf(stdout, `{"virtual-size":%d}`, r.InfoSize)
+}
+
+func TestLimaProfileCreateResizeAndPurgeUseDiskCommands(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	config := model.DefaultConfig(dir)
+	spec := Spec{Config: config}
+
+	createRunner := &limaDiskRunner{diskJSON: `[]`}
+	if err := ensureLimaProfile(ctx, createRunner, io.Discard, io.Discard, spec); err != nil {
+		t.Fatal(err)
 	}
-	return nil
+	if got := commandList(createRunner.calls); !strings.Contains(got, "limactl disk create "+profile.DiskID(config.VMName)) {
+		t.Fatalf("create calls:\n%s", got)
+	}
+	metadata, err := profile.NewStore(dir).Load(config.VMName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Label != profile.DiskLabel(metadata.DiskID) || !strings.HasPrefix(metadata.Label, "agent-os-") {
+		t.Fatalf("new metadata=%+v", metadata)
+	}
+
+	metadata.SizeGiB = 10
+	if err := profile.NewStore(dir).Save(config.VMName, metadata); err != nil {
+		t.Fatal(err)
+	}
+	config.ProfileDiskGiB = 20
+	resizeRunner := &limaDiskRunner{diskJSON: fmt.Sprintf(`[{"name":%q,"size":10737418240}]`, metadata.DiskID)}
+	if err := ensureLimaProfile(ctx, resizeRunner, io.Discard, io.Discard, Spec{Config: config}); err != nil {
+		t.Fatal(err)
+	}
+	if got := commandList(resizeRunner.calls); !strings.Contains(got, "limactl disk resize "+metadata.DiskID+" --size 20GiB") {
+		t.Fatalf("resize calls:\n%s", got)
+	}
+
+	purgeRunner := &limaDiskRunner{}
+	if err := (Lima{Runner: purgeRunner}).PurgeProfile(ctx, Spec{Config: config}); err != nil {
+		t.Fatal(err)
+	}
+	if got := commandList(purgeRunner.calls); got != "limactl disk delete "+metadata.DiskID {
+		t.Fatalf("purge calls=%q", got)
+	}
+	if _, err := profile.NewStore(dir).Load(config.VMName); !os.IsNotExist(err) {
+		t.Fatalf("metadata remains after purge: %v", err)
+	}
+}
+
+func TestLimaProfileRejectsUntrustedDisk(t *testing.T) {
+	config := model.DefaultConfig(t.TempDir())
+	diskID := profile.DiskID(config.VMName)
+	r := &limaDiskRunner{diskJSON: fmt.Sprintf(`[{"name":%q,"size":10737418240}]`, diskID)}
+	if err := ensureLimaProfile(context.Background(), r, io.Discard, io.Discard, Spec{Config: config}); err == nil || !strings.Contains(err.Error(), "without trusted metadata") {
+		t.Fatalf("untrusted disk error=%v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("untrusted disk was mutated: %+v", r.calls)
+	}
+}
+
+func TestExistingLimaPrefixedProfileLabelRemainsCompatible(t *testing.T) {
+	dir := t.TempDir()
+	config := model.DefaultConfig(dir)
+	diskID := profile.DiskID(config.VMName)
+	suffix := diskID
+	if len(suffix) > 11 {
+		suffix = suffix[len(suffix)-11:]
+	}
+	metadata := profile.Metadata{SchemaVersion: profile.SchemaVersion, Provider: "lima", DiskID: diskID, SizeGiB: config.ProfileDiskGiB, Filesystem: profile.Filesystem, Label: "lima-" + suffix}
+	if err := profile.NewStore(dir).Save(config.VMName, metadata); err != nil {
+		t.Fatal(err)
+	}
+	_, loaded, found, err := loadProfile(Spec{Config: config})
+	if err != nil || !found || loaded.Label != metadata.Label {
+		t.Fatalf("loaded=%+v found=%t err=%v", loaded, found, err)
+	}
+}
+
+func commandList(calls []call) string {
+	lines := make([]string, 0, len(calls))
+	for _, call := range calls {
+		lines = append(lines, call.name+" "+strings.Join(call.args, " "))
+	}
+	return strings.Join(lines, "\n")
 }

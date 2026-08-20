@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -25,20 +24,10 @@ import (
 )
 
 type App struct {
-	In     io.Reader
-	Out    io.Writer
-	Err    io.Writer
-	Runner execx.Runner
-	// LookPath is injectable for prerequisite probing tests. New initializes
-	// it to exec.LookPath; callers constructing App directly may leave it nil.
-	LookPath func(string) (string, error)
-	// PathExists is the companion probe for data-only prerequisites such as
-	// Ubuntu's OVMF firmware package.
-	PathExists func(string) bool
-	// ReadFile is injectable for host configuration tests. New initializes it
-	// to os.ReadFile.
-	ReadFile func(string) ([]byte, error)
-
+	In                io.Reader
+	Out               io.Writer
+	Err               io.Writer
+	Runner            execx.Runner
 	root              *cobra.Command
 	resolved          config.Resolved
 	configPath        string
@@ -75,12 +64,6 @@ func NewWithInstructions(in io.Reader, out, errOut io.Writer, runner execx.Runne
 	}
 	app := &App{
 		In: in, Out: out, Err: errOut, Runner: runner,
-		LookPath: exec.LookPath,
-		PathExists: func(path string) bool {
-			_, err := os.Stat(path)
-			return err == nil
-		},
-		ReadFile:          os.ReadFile,
 		agentInstructions: agentInstructions,
 	}
 	app.root = app.newRoot()
@@ -110,7 +93,7 @@ func (a *App) newRoot() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			if cmd.Name() == "completion" || cmd.Name() == "setup-host" {
+			if cmd.Name() == "completion" {
 				return nil
 			}
 			a.flagValues = a.collectFlagValues(cmd)
@@ -161,11 +144,9 @@ func (a *App) newRoot() *cobra.Command {
 	root.PersistentFlags().String("wireguard-address", "", "host WireGuard tunnel address")
 	root.PersistentFlags().String("repository-key-path", "", "repo-scoped private key path")
 	root.PersistentFlags().StringSlice("allowed-cidr", nil, "additional allowed guest egress CIDR (repeatable)")
-	root.PersistentFlags().String("release-repository", "", "GitHub release repository (owner/name)")
 	root.PersistentFlags().String("state-dir", "", "operational state directory")
 	root.PersistentFlags().StringSlice("packages", nil, "additional guest packages")
 
-	root.AddCommand(a.setupHostCommand())
 	root.AddCommand(a.createCommand())
 	root.AddCommand(a.lifecycleCommand("start"))
 	root.AddCommand(a.lifecycleCommand("stop"))
@@ -220,7 +201,6 @@ func (a *App) collectFlagValues(cmd *cobra.Command) map[string]any {
 	add("wireguard-address", "wireguard.address")
 	add("repository-key-path", "repository.key_path")
 	addSlice("allowed-cidr", "network.allowed_cidrs")
-	add("release-repository", "release.repository")
 	add("state-dir", "state.dir")
 	addSlice("packages", "packages")
 	return values
@@ -273,17 +253,11 @@ func (a *App) backendSpec(c model.Config, dryRun bool) backend.Spec {
 }
 
 func execAsAgent(ctx context.Context, p backend.Provider, name string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	if userProvider, ok := p.(backend.UserExecutor); ok {
-		return userProvider.ExecAsUser(ctx, name, "agent", args, stdin, stdout, stderr)
-	}
-	return p.Exec(ctx, name, args, stdin, stdout, stderr)
+	return p.ExecAsUser(ctx, name, "agent", args, stdin, stdout, stderr)
 }
 
 func execAsRoot(ctx context.Context, p backend.Provider, name string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	if rootProvider, ok := p.(backend.AdminExecutor); ok {
-		return rootProvider.ExecAsRoot(ctx, name, args, stdin, stdout, stderr)
-	}
-	return p.Exec(ctx, name, args, stdin, stdout, stderr)
+	return p.ExecAsRoot(ctx, name, args, stdin, stdout, stderr)
 }
 
 func argName(args []string) string {

@@ -35,7 +35,6 @@ var documentedEnv = map[string]string{
 	"wireguard.address":     "AGENT_OS_WIREGUARD_ADDRESS",
 	"repository.key_path":   "AGENT_OS_REPOSITORY_KEY_PATH",
 	"network.allowed_cidrs": "AGENT_OS_ALLOWED_CIDRS",
-	"release.repository":    "AGENT_OS_RELEASE_REPOSITORY",
 	"state.dir":             "AGENT_OS_STATE_DIR",
 	"log.format":            "AGENT_OS_LOG_FORMAT",
 	"packages":              "AGENT_OS_PACKAGES",
@@ -340,7 +339,6 @@ func setDefaults(v *viper.Viper, c model.Config) {
 	v.SetDefault("wireguard.interface", "")
 	v.SetDefault("wireguard.address", "")
 	v.SetDefault("repository.key_path", "")
-	v.SetDefault("release.repository", c.ReleaseRepository)
 	v.SetDefault("state.dir", c.StateDir)
 	v.SetDefault("log.format", string(c.LogFormat))
 	v.SetDefault("packages", c.Packages)
@@ -369,7 +367,6 @@ func readConfig(v *viper.Viper) model.Config {
 		WireGuardAddress:   v.GetString("wireguard.address"),
 		RepositoryKeyPath:  v.GetString("repository.key_path"),
 		AllowedCIDRs:       allowedCIDRs,
-		ReleaseRepository:  v.GetString("release.repository"),
 		StateDir:           v.GetString("state.dir"),
 		LogFormat:          model.LogFormat(v.GetString("log.format")),
 		Packages:           stringSlice(v.Get("packages")),
@@ -435,7 +432,6 @@ func (r Resolved) EffectiveValues() map[string]any {
 		"wireguard.address":     c.WireGuardAddress,
 		"repository.key_path":   c.RepositoryKeyPath,
 		"network.allowed_cidrs": c.AllowedCIDRs,
-		"release.repository":    c.ReleaseRepository,
 		"state.dir":             c.StateDir,
 		"log.format":            c.LogFormat,
 		"packages":              c.Packages,
@@ -469,7 +465,7 @@ func (r Resolved) ConfigYAML() ([]byte, error) {
 		fmt.Fprintf(&b, "repository:\n  key_path: %s\n", r.Config.RepositoryKeyPath)
 	}
 	fmt.Fprintf(&b, "network:\n  allowed_cidrs: %s\n", yamlList(r.Config.AllowedCIDRs))
-	fmt.Fprintf(&b, "release:\n  repository: %s\nstate:\n  dir: %s\nlog:\n  format: %s\npackages: %s\nskills: %s\n", r.Config.ReleaseRepository, r.Config.StateDir, r.Config.LogFormat, yamlList(r.Config.Packages), yamlList(r.Config.Skills))
+	fmt.Fprintf(&b, "state:\n  dir: %s\nlog:\n  format: %s\npackages: %s\nskills: %s\n", r.Config.StateDir, r.Config.LogFormat, yamlList(r.Config.Packages), yamlList(r.Config.Skills))
 	return []byte(b.String()), nil
 }
 

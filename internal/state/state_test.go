@@ -14,7 +14,7 @@ import (
 func TestSaveIsAtomicPrivateAndVersioned(t *testing.T) {
 	store := NewStore(t.TempDir())
 	store.Now = func() time.Time { return time.Date(2026, 8, 8, 0, 0, 0, 0, time.UTC) }
-	value := State{Name: "agents", Provider: "fake", Lifecycle: model.StatusStopped}
+	value := State{Name: "agents", Provider: "lima", Lifecycle: model.StatusStopped}
 	if err := store.Save(value); err != nil {
 		t.Fatal(err)
 	}
@@ -91,5 +91,25 @@ func TestOlderStateFilesDecodeWithAutostartDisabled(t *testing.T) {
 	}
 	if value.Autostart != nil {
 		t.Fatalf("legacy state unexpectedly enabled autostart: %+v", value.Autostart)
+	}
+}
+
+func TestRejectsNonLimaProvider(t *testing.T) {
+	store := NewStore(t.TempDir())
+	if err := store.Save(State{Name: "agents", Provider: "legacy", Lifecycle: model.StatusStopped}); err == nil {
+		t.Fatal("saved non-Lima provider state")
+	}
+	path, err := store.Path("agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"schema_version":1,"name":"agents","provider":"legacy","lifecycle":"stopped"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Load("agents"); err == nil {
+		t.Fatal("loaded non-Lima provider state")
 	}
 }

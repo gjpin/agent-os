@@ -1,14 +1,10 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -16,369 +12,11 @@ import (
 	"github.com/gjpin/agent-os/internal/backend"
 	"github.com/gjpin/agent-os/internal/config"
 	"github.com/gjpin/agent-os/internal/credentials"
-	"github.com/gjpin/agent-os/internal/host"
 	"github.com/gjpin/agent-os/internal/model"
 	"github.com/gjpin/agent-os/internal/provision"
 	"github.com/gjpin/agent-os/internal/state"
 	"github.com/spf13/cobra"
 )
-
-func (a *App) setupHostCommand() *cobra.Command {
-	var apply, yes bool
-	cmd := &cobra.Command{
-		Use:   "setup-host",
-		Short: "Detect the host and show or apply virtualization prerequisites",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			info := host.Detect()
-			plan := setupPlan(info)
-			if !apply {
-				fmt.Fprintf(a.Out, "host: %s/%s\nprovider: %s\n", info.OS, info.Architecture, info.Provider)
-				if info.OS == "linux" {
-					fmt.Fprintf(a.Out, "distribution: %s\n", info.Distribution)
-				}
-				for _, item := range plan {
-					fmt.Fprintf(a.Out, "- %s\n", item)
-				}
-				fmt.Fprintln(a.Out, "No changes made. Re-run with --apply to install/configure prerequisites.")
-				return nil
-			}
-			if !yes {
-				if err := confirm(a.In, a.Out, isTTY(a.In), "apply host virtualization changes"); err != nil {
-					return err
-				}
-			}
-			return a.applySetup(cmd.Context(), info, plan)
-		},
-	}
-	cmd.Flags().BoolVar(&apply, "apply", false, "apply prerequisite installation instead of only showing the plan")
-	cmd.Flags().BoolVar(&yes, "yes", false, "confirm host changes non-interactively")
-	return cmd
-}
-
-func setupPlan(info host.Info) []string {
-	family := distributionFamily(info)
-	switch {
-	case info.OS == "darwin" && info.Architecture == "arm64":
-		return []string{"require Lima", "if Homebrew is missing, confirm and install it from the official source", "brew install lima"}
-	case info.OS == "linux" && family != "" && (family != "arch" || info.Architecture == "amd64"):
-		packages := prerequisitePackageNames(family)
-		return []string{
-			fmt.Sprintf("probe %s virtualization commands for %s", family, info.Distribution),
-			"install only missing prerequisites: " + strings.Join(packages, ", "),
-			"append missing libvirt QEMU hardening settings and restart the QEMU driver",
-			"enable/use unprivileged QEMU with libvirt",
-		}
-	default:
-		return []string{"unsupported host: no changes are available"}
-	}
-}
-
-func (a *App) applySetup(ctx context.Context, info host.Info, plan []string) error {
-	if info.OS == "darwin" && info.Architecture == "arm64" {
-		if a.commandAvailable("limactl") {
-			fmt.Fprintln(a.Out, "host prerequisites are already installed")
-			return nil
-		}
-		if !a.commandAvailable("brew") {
-			return a.installHomebrew(ctx)
-		}
-		return a.Runner.Run(ctx, "brew", []string{"install", "lima"}, nil, a.Out, a.Err)
-	}
-	if info.OS != "linux" {
-		return fmt.Errorf("cannot configure unsupported host %s/%s", info.OS, info.Architecture)
-	}
-	family := distributionFamily(info)
-	if family == "" {
-		if strings.TrimSpace(info.Distribution) == "" {
-			return fmt.Errorf("unable to detect a supported Linux distribution; supported distributions are Fedora, Ubuntu, and Arch Linux")
-		}
-		return fmt.Errorf("unsupported Linux distribution %q; supported distributions are Fedora, Ubuntu, and Arch Linux", info.Distribution)
-	}
-	if family == "arch" && info.Architecture != "amd64" {
-		return fmt.Errorf("unsupported Arch Linux architecture %q; Arch Linux support requires x86_64 (linux/amd64)", info.Architecture)
-	}
-	missing := a.missingPrerequisitePackages(family)
-	if len(missing) == 0 {
-		fmt.Fprintln(a.Out, "host prerequisites are already installed")
-	} else {
-		// Keep the plan parameter for compatibility with the existing command
-		// flow; the actual package list is derived from fresh probes above.
-		_ = plan
-		var executable string
-		var args []string
-		switch family {
-		case "fedora":
-			executable, args = "sudo", append([]string{"dnf", "install", "-y"}, missing...)
-		case "ubuntu":
-			executable, args = "sudo", append([]string{"apt-get", "install", "-y"}, missing...)
-		case "arch":
-			executable, args = "sudo", append([]string{"pacman", "--sync", "--needed", "--noconfirm"}, missing...)
-		default:
-			return fmt.Errorf("unsupported Linux distribution %q", info.Distribution)
-		}
-		if err := a.Runner.Run(ctx, executable, args, nil, a.Out, a.Err); err != nil {
-			return err
-		}
-	}
-	if family == "arch" {
-		if err := a.Runner.Run(ctx, "sudo", []string{"systemctl", "enable", "--now", "libvirtd.service"}, nil, a.Out, a.Err); err != nil {
-			return fmt.Errorf("enable and start libvirtd.service: %w", err)
-		}
-	}
-
-	changed, err := a.ensureLibvirtQEMUHardeningFor(ctx, family)
-	if err != nil {
-		return err
-	}
-	if changed {
-		fmt.Fprintln(a.Out, "configured missing libvirt QEMU hardening settings")
-	} else {
-		fmt.Fprintln(a.Out, "libvirt QEMU hardening settings are already configured")
-	}
-	return nil
-}
-
-const libvirtQEMUConfigPath = "/etc/libvirt/qemu.conf"
-
-type libvirtQEMUSetting struct {
-	key   string
-	value string
-}
-
-var requiredLibvirtQEMUSettings = []libvirtQEMUSetting{
-	{key: "seccomp_sandbox", value: "1"},
-	{key: "namespaces", value: `[ "mount" ]`},
-	{key: "cgroup_controllers", value: `[ "devices" ]`},
-}
-
-// ensureLibvirtQEMUHardening appends only assignments whose keys are absent
-// from qemu.conf. Existing values, including explicitly insecure values, are
-// never rewritten; the backend will reject those values during create/start.
-func (a *App) ensureLibvirtQEMUHardening(ctx context.Context) (bool, error) {
-	return a.ensureLibvirtQEMUHardeningFor(ctx, "")
-}
-
-func (a *App) ensureLibvirtQEMUHardeningFor(ctx context.Context, family string) (bool, error) {
-	readFile := a.ReadFile
-	if readFile == nil {
-		readFile = os.ReadFile
-	}
-	data, err := readFile(libvirtQEMUConfigPath)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return false, fmt.Errorf("read libvirt QEMU configuration %s: %w", libvirtQEMUConfigPath, err)
-	}
-	missing := missingLibvirtQEMUSettings(data)
-	if len(missing) == 0 {
-		return false, nil
-	}
-
-	var block strings.Builder
-	if len(data) > 0 && data[len(data)-1] != '\n' {
-		block.WriteByte('\n')
-	}
-	for _, setting := range missing {
-		fmt.Fprintf(&block, "%s = %s\n", setting.key, setting.value)
-	}
-	if err := a.Runner.Run(ctx, "sudo", []string{"tee", "-a", libvirtQEMUConfigPath}, strings.NewReader(block.String()), io.Discard, a.Err); err != nil {
-		return false, fmt.Errorf("append libvirt QEMU hardening settings: %w", err)
-	}
-	if err := a.restartLibvirtQEMUFor(ctx, family); err != nil {
-		return true, err
-	}
-	return true, nil
-}
-
-func missingLibvirtQEMUSettings(data []byte) []libvirtQEMUSetting {
-	present := make(map[string]bool, len(requiredLibvirtQEMUSettings))
-	for _, rawLine := range strings.Split(string(data), "\n") {
-		line := strings.TrimSpace(rawLine)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		left, _, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		key := strings.TrimSpace(left)
-		for _, setting := range requiredLibvirtQEMUSettings {
-			if key == setting.key {
-				present[key] = true
-			}
-		}
-	}
-
-	missing := make([]libvirtQEMUSetting, 0, len(requiredLibvirtQEMUSettings))
-	for _, setting := range requiredLibvirtQEMUSettings {
-		if !present[setting.key] {
-			missing = append(missing, setting)
-		}
-	}
-	return missing
-}
-
-func (a *App) restartLibvirtQEMU(ctx context.Context) error {
-	return a.restartLibvirtQEMUFor(ctx, "")
-}
-
-func (a *App) restartLibvirtQEMUFor(ctx context.Context, family string) error {
-	if family == "arch" {
-		if err := a.Runner.Run(ctx, "sudo", []string{"systemctl", "restart", "libvirtd.service"}, nil, a.Out, a.Err); err != nil {
-			return fmt.Errorf("restart libvirt QEMU driver libvirtd.service: %w", err)
-		}
-		return nil
-	}
-	for _, service := range []string{"virtqemud.service", "libvirtd.service"} {
-		var state bytes.Buffer
-		if err := a.Runner.Run(ctx, "sudo", []string{"systemctl", "show", "--property=LoadState", "--value", service}, nil, &state, io.Discard); err != nil {
-			continue
-		}
-		if strings.TrimSpace(state.String()) != "loaded" {
-			continue
-		}
-		if err := a.Runner.Run(ctx, "sudo", []string{"systemctl", "restart", service}, nil, a.Out, a.Err); err != nil {
-			return fmt.Errorf("restart libvirt QEMU driver %s: %w", service, err)
-		}
-		return nil
-	}
-	return errors.New("could not find a systemd libvirt QEMU service (tried virtqemud.service and libvirtd.service)")
-}
-
-func distributionFamily(info host.Info) string {
-	return host.DistributionFamily(info.Distribution)
-}
-
-type prerequisite struct {
-	packageName string
-	probes      []string
-	anyProbe    bool
-}
-
-func prerequisitesFor(distribution string) []prerequisite {
-	distribution = host.DistributionFamily(distribution)
-	switch strings.ToLower(strings.TrimSpace(distribution)) {
-	case "fedora":
-		return []prerequisite{
-			{packageName: "@virtualization", probes: []string{"virsh", "virt-install", "qemu-system-x86_64"}},
-			{packageName: "qemu-img", probes: []string{"qemu-img"}},
-			{packageName: "libvirt-daemon-config-network", probes: []string{"virtnetworkd", "libvirtd"}, anyProbe: true},
-			{packageName: "cloud-utils", probes: []string{"cloud-localds"}},
-			{packageName: "nftables", probes: []string{"nft"}},
-		}
-	case "ubuntu":
-		return []prerequisite{
-			// Ubuntu's qemu-system meta-package is intentional: qemu-system-x86
-			// is an implementation package and is not the requested interface.
-			{packageName: "qemu-system", probes: []string{"qemu-system-x86_64"}},
-			{packageName: "qemu-utils", probes: []string{"qemu-img"}},
-			{packageName: "libvirt-daemon-system", probes: []string{"libvirtd", "virtqemud"}, anyProbe: true},
-			{packageName: "libvirt-daemon-driver-qemu", probes: []string{"virtqemud"}},
-			{packageName: "libvirt-clients", probes: []string{"virsh"}},
-			{packageName: "virtinst", probes: []string{"virt-install"}},
-			{packageName: "ovmf", probes: []string{"/usr/share/OVMF/OVMF_CODE.fd"}},
-			{packageName: "bridge-utils", probes: []string{"brctl"}},
-			{packageName: "dnsmasq", probes: []string{"dnsmasq"}},
-			{packageName: "cloud-image-utils", probes: []string{"cloud-localds"}},
-			{packageName: "nftables", probes: []string{"nft"}},
-		}
-	case "arch":
-		return []prerequisite{
-			{packageName: "qemu-base", probes: []string{"qemu-system-x86_64", "qemu-img"}},
-			{packageName: "libvirt", probes: []string{"libvirtd", "virsh"}},
-			{packageName: "virt-install", probes: []string{"virt-install"}},
-			{packageName: "dnsmasq", probes: []string{"dnsmasq"}},
-			{packageName: "cloud-image-utils", probes: []string{"cloud-localds"}},
-			{packageName: "nftables", probes: []string{"nft"}},
-			{packageName: "iptables", probes: []string{"iptables"}},
-		}
-	default:
-		return nil
-	}
-}
-
-func prerequisitePackageNames(distribution string) []string {
-	requirements := prerequisitesFor(distribution)
-	names := make([]string, 0, len(requirements))
-	for _, requirement := range requirements {
-		names = append(names, requirement.packageName)
-	}
-	return names
-}
-
-func (a *App) commandAvailable(name string) bool {
-	lookup := a.LookPath
-	if lookup == nil {
-		lookup = exec.LookPath
-	}
-	_, err := lookup(name)
-	return err == nil
-}
-
-func (a *App) pathAvailable(path string) bool {
-	if a.PathExists != nil {
-		return a.PathExists(path)
-	}
-	_, err := os.Stat(path)
-	return err == nil
-}
-
-func (a *App) probeAvailable(name string) bool {
-	if strings.ContainsRune(name, '/') {
-		return a.pathAvailable(name)
-	}
-	return a.commandAvailable(name)
-}
-
-func (a *App) prerequisiteInstalled(requirement prerequisite) bool {
-	if len(requirement.probes) == 0 {
-		return false
-	}
-	if requirement.anyProbe {
-		for _, probe := range requirement.probes {
-			if a.probeAvailable(probe) {
-				return true
-			}
-		}
-		return false
-	}
-	for _, probe := range requirement.probes {
-		if !a.probeAvailable(probe) {
-			return false
-		}
-	}
-	return true
-}
-
-func (a *App) missingPrerequisitePackages(distribution string) []string {
-	missing := make([]string, 0)
-	for _, requirement := range prerequisitesFor(distribution) {
-		if !a.prerequisiteInstalled(requirement) {
-			missing = append(missing, requirement.packageName)
-		}
-	}
-	return missing
-}
-
-func (a *App) installHomebrew(ctx context.Context) error {
-	file, err := os.CreateTemp("", "agent-os-homebrew-install-*.sh")
-	if err != nil {
-		return err
-	}
-	path := file.Name()
-	_ = file.Close()
-	defer os.Remove(path)
-	if err := os.Chmod(path, 0o700); err != nil {
-		return err
-	}
-	const installerURL = "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
-	if err := a.Runner.Run(ctx, "curl", []string{"--fail", "--location", "--proto", "=https", "--tlsv1.2", "--output", path, installerURL}, nil, a.Out, a.Err); err != nil {
-		return fmt.Errorf("download the official Homebrew installer: %w", err)
-	}
-	if err := a.Runner.Run(ctx, "/bin/bash", []string{path}, nil, a.Out, a.Err); err != nil {
-		return fmt.Errorf("run the official Homebrew installer: %w", err)
-	}
-	return a.Runner.Run(ctx, "brew", []string{"install", "lima"}, nil, a.Out, a.Err)
-}
 
 func (a *App) createCommand() *cobra.Command {
 	var dryRun bool
@@ -429,7 +67,6 @@ func (a *App) createCommand() *cobra.Command {
 					return fmt.Errorf("create %s: %w", c.VMName, err)
 				}
 				value.Lifecycle = model.StatusStopped
-				value.Artifacts = map[string]string{"directory": filepath.Join(c.StateDir, "v1", "vms", c.VMName, "artifacts")}
 				if err := store.Save(value); err != nil {
 					return err
 				}
@@ -464,12 +101,8 @@ func (a *App) lifecycleCommand(action string) *cobra.Command {
 				startedByCommand := false
 				alreadyRunning := false
 				if action == "start" {
-					forwarding, hasForwarding := p.(backend.Forwarding)
-					forwardingSpec := a.backendSpec(c, false)
-					if hasForwarding {
-						if err := forwarding.ConfigureForwarding(cmd.Context(), forwardingSpec); err != nil {
-							return err
-						}
+					if err := p.ConfigureForwarding(cmd.Context(), a.backendSpec(c, false)); err != nil {
+						return err
 					}
 					providerStatus, statusErr := p.Status(cmd.Context(), c.VMName)
 					if statusErr != nil {
@@ -481,20 +114,14 @@ func (a *App) lifecycleCommand(action string) *cobra.Command {
 						opErr = p.Start(cmd.Context(), c.VMName)
 					}
 					if opErr == nil {
-						if refresher, ok := p.(backend.InstructionRefresher); ok {
-							opErr = refresher.RefreshAgentInstructions(cmd.Context(), c.VMName, a.agentInstructions)
-						}
+						opErr = p.RefreshAgentInstructions(cmd.Context(), c.VMName, a.agentInstructions)
 					}
 					if opErr == nil {
-						if profiles, ok := p.(backend.ProfileLifecycle); ok {
-							opErr = profiles.SyncProfile(cmd.Context(), a.backendSpec(c, false), true)
-						}
+						opErr = p.SyncProfile(cmd.Context(), a.backendSpec(c, false), true)
 					}
 				} else {
-					if profiles, ok := p.(backend.ProfileLifecycle); ok {
-						if err := profiles.SyncProfile(cmd.Context(), a.backendSpec(c, false), false); err != nil {
-							return fmt.Errorf("sync persistent profile before stop: %w", err)
-						}
+					if err := p.SyncProfile(cmd.Context(), a.backendSpec(c, false), false); err != nil {
+						return fmt.Errorf("sync persistent profile before stop: %w", err)
 					}
 					opErr = p.Stop(cmd.Context(), c.VMName)
 				}
@@ -505,11 +132,6 @@ func (a *App) lifecycleCommand(action string) *cobra.Command {
 						if startedByCommand {
 							if stopErr := p.Stop(cleanupCtx, c.VMName); stopErr != nil {
 								cleanupErrors = append(cleanupErrors, fmt.Errorf("stop VM after failed start: %w", stopErr))
-							}
-						}
-						if forwarding, ok := p.(backend.Forwarding); ok {
-							if forwardingErr := forwarding.RemoveForwarding(cleanupCtx, a.backendSpec(c, false)); forwardingErr != nil {
-								cleanupErrors = append(cleanupErrors, fmt.Errorf("remove forwarding after failed start: %w", forwardingErr))
 							}
 						}
 						cancel()
@@ -524,13 +146,6 @@ func (a *App) lifecycleCommand(action string) *cobra.Command {
 						return errors.Join(cleanupErrors...)
 					}
 					return opErr
-				}
-				if action == "stop" {
-					if forwarding, ok := p.(backend.Forwarding); ok {
-						if err := forwarding.RemoveForwarding(cmd.Context(), a.backendSpec(c, false)); err != nil {
-							return err
-						}
-					}
 				}
 				if action == "start" {
 					value.Lifecycle = model.StatusRunning
@@ -551,13 +166,13 @@ func (a *App) lifecycleCommand(action string) *cobra.Command {
 func (a *App) autostartCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "autostart",
-		Short: "Register a VM to start at host boot",
+		Short: "Register a VM to start at Linux login or macOS boot",
 	}
 	for _, action := range []string{"enable", "disable"} {
 		action := action
 		subcommand := &cobra.Command{
 			Use:   action + " [name]",
-			Short: strings.Title(action) + " VM host-boot registration",
+			Short: strings.Title(action) + " VM autostart registration",
 			Args:  func(cmd *cobra.Command, args []string) error { return a.nameArgs(cmd, args) },
 			RunE: func(cmd *cobra.Command, args []string) error {
 				p, c, store, err := a.providerAndConfig(argName(args))
@@ -572,7 +187,7 @@ func (a *App) autostartCommand() *cobra.Command {
 	}
 	cmd.AddCommand(&cobra.Command{
 		Use:   "status [name]",
-		Short: "Show VM host-boot registration",
+		Short: "Show VM autostart registration",
 		Args:  func(cmd *cobra.Command, args []string) error { return a.nameArgs(cmd, args) },
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p, c, store, err := a.providerAndConfig(argName(args))
@@ -615,52 +230,29 @@ func (a *App) changeAutostart(ctx context.Context, p backend.Provider, c model.C
 		if value.Provider != p.Name() {
 			return fmt.Errorf("state provider %q does not match host provider %q", value.Provider, p.Name())
 		}
-		starter, ok := p.(backend.Autostarter)
-		if !ok {
-			return fmt.Errorf("provider %q does not support autostart", p.Name())
-		}
-		artifactsProvider, hasArtifacts := p.(backend.AutostartArtifacts)
-		spec := a.backendSpec(c, false)
 		wasEnabled := value.Autostart != nil && value.Autostart.Enabled
 
 		if enable {
-			if err := starter.EnableAutostart(ctx, c.VMName); err != nil {
+			if err := p.EnableAutostart(ctx, c.VMName); err != nil {
 				return fmt.Errorf("enable %s autostart: %w", c.VMName, err)
-			}
-			if hasArtifacts {
-				if err := artifactsProvider.ConfigureAutostart(ctx, spec); err != nil {
-					if wasEnabled {
-						return fmt.Errorf("configure %s autostart: %w", c.VMName, err)
-					}
-					return errors.Join(
-						fmt.Errorf("configure %s autostart: %w", c.VMName, err),
-						autostartRollback(ctx, starter, artifactsProvider, hasArtifacts, spec, true),
-					)
-				}
 			}
 			value.Autostart = &state.AutostartState{Enabled: true}
 			if err := store.Save(value); err != nil {
 				if wasEnabled {
 					return fmt.Errorf("save autostart state: %w", err)
 				}
-				return errors.Join(fmt.Errorf("save autostart state: %w", err), autostartRollback(ctx, starter, artifactsProvider, hasArtifacts, spec, true))
+				return errors.Join(fmt.Errorf("save autostart state: %w", err), autostartRollback(ctx, p, c.VMName, true))
 			}
 			a.emit(c, "autostart-enabled", fmt.Sprintf("enabled autostart for VM %s", c.VMName), map[string]any{"name": c.VMName, "provider": p.Name()})
 			return nil
 		}
 
-		if err := starter.DisableAutostart(ctx, c.VMName); err != nil {
+		if err := p.DisableAutostart(ctx, c.VMName); err != nil {
 			return fmt.Errorf("disable %s autostart: %w", c.VMName, err)
-		}
-		if hasArtifacts {
-			if err := artifactsProvider.RemoveAutostart(ctx, spec); err != nil {
-				rollbackErr := autostartRollback(ctx, starter, artifactsProvider, hasArtifacts, spec, false)
-				return errors.Join(fmt.Errorf("remove %s autostart artifacts: %w", c.VMName, err), rollbackErr)
-			}
 		}
 		value.Autostart = nil
 		if err := store.Save(value); err != nil {
-			rollbackErr := autostartRollback(ctx, starter, artifactsProvider, hasArtifacts, spec, false)
+			rollbackErr := autostartRollback(ctx, p, c.VMName, false)
 			return errors.Join(fmt.Errorf("save autostart state: %w", err), rollbackErr)
 		}
 		a.emit(c, "autostart-disabled", fmt.Sprintf("disabled autostart for VM %s", c.VMName), map[string]any{"name": c.VMName, "provider": p.Name()})
@@ -668,29 +260,17 @@ func (a *App) changeAutostart(ctx context.Context, p backend.Provider, c model.C
 	})
 }
 
-func autostartRollback(ctx context.Context, starter backend.Autostarter, artifactsProvider backend.AutostartArtifacts, hasArtifacts bool, spec backend.Spec, afterEnable bool) error {
-	var rollback []error
+func autostartRollback(ctx context.Context, p backend.Provider, name string, afterEnable bool) error {
 	if afterEnable {
-		if hasArtifacts {
-			if err := artifactsProvider.RemoveAutostart(ctx, spec); err != nil {
-				rollback = append(rollback, fmt.Errorf("remove autostart artifacts during rollback: %w", err))
-			}
+		if err := p.DisableAutostart(ctx, name); err != nil {
+			return fmt.Errorf("unregister autostart during rollback: %w", err)
 		}
-		if err := starter.DisableAutostart(ctx, spec.Config.VMName); err != nil {
-			rollback = append(rollback, fmt.Errorf("unregister autostart during rollback: %w", err))
-		}
-		return errors.Join(rollback...)
+		return nil
 	}
-
-	if err := starter.EnableAutostart(ctx, spec.Config.VMName); err != nil {
-		rollback = append(rollback, fmt.Errorf("restore provider autostart during rollback: %w", err))
+	if err := p.EnableAutostart(ctx, name); err != nil {
+		return fmt.Errorf("restore provider autostart during rollback: %w", err)
 	}
-	if hasArtifacts {
-		if err := artifactsProvider.ConfigureAutostart(ctx, spec); err != nil {
-			rollback = append(rollback, fmt.Errorf("restore autostart artifacts during rollback: %w", err))
-		}
-	}
-	return errors.Join(rollback...)
+	return nil
 }
 
 func (a *App) statusCommand() *cobra.Command {
@@ -715,7 +295,7 @@ func (a *App) statusCommand() *cobra.Command {
 				providerStatus.Lifecycle = value.Lifecycle
 			}
 			if c.LogFormat == model.LogJSON {
-				return a.emitJSON(map[string]any{"name": c.VMName, "provider": providerStatus.Provider, "lifecycle": providerStatus.Lifecycle, "backend_id": providerStatus.BackendID, "local_state": stateErr == nil})
+				return a.emitJSON(map[string]any{"name": c.VMName, "provider": providerStatus.Provider, "lifecycle": providerStatus.Lifecycle, "local_state": stateErr == nil})
 			}
 			fmt.Fprintf(a.Out, "%s\t%s\t%s\n", c.VMName, providerStatus.Provider, providerStatus.Lifecycle)
 			return nil
@@ -898,10 +478,8 @@ func (a *App) upgradeCommand() *cobra.Command {
 			if _, err := store.Load(c.VMName); err != nil {
 				return err
 			}
-			if profiles, ok := p.(backend.ProfileLifecycle); ok {
-				if err := profiles.SyncProfile(cmd.Context(), a.backendSpec(c, false), false); err != nil {
-					return fmt.Errorf("sync persistent profile before upgrade: %w", err)
-				}
+			if err := p.SyncProfile(cmd.Context(), a.backendSpec(c, false), false); err != nil {
+				return fmt.Errorf("sync persistent profile before upgrade: %w", err)
 			}
 			return p.Upgrade(cmd.Context(), c.VMName, a.backendSpec(c, false))
 		},
@@ -937,7 +515,6 @@ func (a *App) destroyCommand() *cobra.Command {
 				}
 				autostartEnabled := stateErr == nil && value.Autostart != nil && value.Autostart.Enabled
 				stopped := false
-				profiles, hasProfiles := p.(backend.ProfileLifecycle)
 				profileSynced := true
 				providerDestroyNeeded := true
 				if status, statusErr := p.Status(cmd.Context(), c.VMName); statusErr == nil {
@@ -945,12 +522,10 @@ func (a *App) destroyCommand() *cobra.Command {
 					case model.StatusStopped:
 						stopped = true
 					case model.StatusRunning:
-						if hasProfiles {
-							if err := profiles.SyncProfile(cmd.Context(), a.backendSpec(c, false), false); err != nil {
-								profileSynced = false
-								if !force {
-									return fmt.Errorf("sync persistent profile before destroy: %w", err)
-								}
+						if err := p.SyncProfile(cmd.Context(), a.backendSpec(c, false), false); err != nil {
+							profileSynced = false
+							if !force {
+								return fmt.Errorf("sync persistent profile before destroy: %w", err)
 							}
 						}
 						if err := p.Stop(cmd.Context(), c.VMName); err != nil {
@@ -975,40 +550,17 @@ func (a *App) destroyCommand() *cobra.Command {
 				} else if purgeProfiles {
 					// A normal destroy removes the VM state but intentionally
 					// retains the profile. Purge is therefore also allowed as a
-					// follow-up command; each provider's purge operation verifies
-					// that no domain/instance still owns the disk.
+					// follow-up command; Lima verifies that no instance still owns
+					// the disk before deleting it.
 					stopped = true
 					providerDestroyNeeded = false
 				} else if !force {
 					return fmt.Errorf("verify VM state before destroy: %w", statusErr)
 				}
 				if autostartEnabled {
-					starter, hasAutostart := p.(backend.Autostarter)
-					if !hasAutostart {
-						if !force {
-							return fmt.Errorf("provider %q does not support autostart cleanup", p.Name())
-						}
-					} else if err := starter.DisableAutostart(cmd.Context(), c.VMName); err != nil {
+					if err := p.DisableAutostart(cmd.Context(), c.VMName); err != nil {
 						if !force {
 							return fmt.Errorf("disable VM autostart before destroy: %w", err)
-						}
-					} else if autostartArtifacts, ok := p.(backend.AutostartArtifacts); ok {
-						if err := autostartArtifacts.RemoveAutostart(cmd.Context(), a.backendSpec(c, false)); err != nil && !force {
-							return fmt.Errorf("remove VM autostart artifacts before destroy: %w", err)
-						}
-					}
-				}
-				if forwarding, ok := p.(backend.Forwarding); ok {
-					if err := forwarding.RemoveForwarding(cmd.Context(), a.backendSpec(c, false)); err != nil && !force {
-						return err
-					}
-				}
-				detached := true
-				if hasProfiles && providerDestroyNeeded {
-					if err := profiles.DetachProfile(cmd.Context(), a.backendSpec(c, false)); err != nil {
-						detached = false
-						if !force {
-							return fmt.Errorf("detach persistent profile before destroy: %w", err)
 						}
 					}
 				}
@@ -1022,13 +574,10 @@ func (a *App) destroyCommand() *cobra.Command {
 					}
 				}
 				if purgeProfiles {
-					if !hasProfiles {
-						return errors.New("provider does not support profile purge")
+					if !profileSynced || !stopped || !destroyed {
+						return errors.New("refusing to purge profile: shutdown and synchronization were not confirmed")
 					}
-					if !profileSynced || !stopped || !detached || !destroyed {
-						return errors.New("refusing to purge profile: shutdown, synchronization, and detachment were not confirmed")
-					}
-					if err := profiles.PurgeProfile(cmd.Context(), a.backendSpec(c, false)); err != nil {
+					if err := p.PurgeProfile(cmd.Context(), a.backendSpec(c, false)); err != nil {
 						return err
 					}
 				}

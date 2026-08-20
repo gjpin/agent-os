@@ -48,7 +48,6 @@ type Config struct {
 	WireGuardAddress   string
 	RepositoryKeyPath  string
 	AllowedCIDRs       []string
-	ReleaseRepository  string
 	StateDir           string
 	LogFormat          LogFormat
 	Packages           []string
@@ -57,18 +56,17 @@ type Config struct {
 
 func DefaultConfig(stateDir string) Config {
 	return Config{
-		VMName:            DefaultVMName,
-		VMCPUs:            DefaultVMCPUs,
-		VMMemoryMiB:       DefaultVMMemoryMiB,
-		VMDiskGiB:         DefaultVMDiskGiB,
-		ProfileDiskGiB:    DefaultProfileDiskGiB,
-		AccessMode:        AccessLocal,
-		OrcaPort:          DefaultOrcaPort,
-		ReleaseRepository: "gjpin/agent-os",
-		StateDir:          stateDir,
-		LogFormat:         LogHuman,
-		Packages:          nil,
-		Skills:            provision.DefaultSkills(),
+		VMName:         DefaultVMName,
+		VMCPUs:         DefaultVMCPUs,
+		VMMemoryMiB:    DefaultVMMemoryMiB,
+		VMDiskGiB:      DefaultVMDiskGiB,
+		ProfileDiskGiB: DefaultProfileDiskGiB,
+		AccessMode:     AccessLocal,
+		OrcaPort:       DefaultOrcaPort,
+		StateDir:       stateDir,
+		LogFormat:      LogHuman,
+		Packages:       nil,
+		Skills:         provision.DefaultSkills(),
 	}
 }
 
@@ -110,14 +108,6 @@ func (c Config) Validate() error {
 	for _, cidr := range c.AllowedCIDRs {
 		if _, _, err := net.ParseCIDR(cidr); err != nil {
 			problems = append(problems, fmt.Sprintf("network.allowed_cidrs contains invalid CIDR %q", cidr))
-		}
-	}
-	if strings.TrimSpace(c.ReleaseRepository) == "" {
-		problems = append(problems, "release.repository must not be empty")
-	} else {
-		parts := strings.Split(c.ReleaseRepository, "/")
-		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" || strings.ContainsAny(c.ReleaseRepository, " \t\r\n") {
-			problems = append(problems, "release.repository must be an owner/name pair")
 		}
 	}
 	if strings.TrimSpace(c.StateDir) == "" {

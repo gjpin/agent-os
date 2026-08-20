@@ -10,322 +10,93 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gjpin/agent-os/internal/backend"
 	"github.com/gjpin/agent-os/internal/execx"
-	"github.com/gjpin/agent-os/internal/host"
+	"github.com/gjpin/agent-os/internal/model"
+	"github.com/gjpin/agent-os/internal/state"
 )
 
-type setupScriptedRunner struct {
-	Calls   []execx.Invocation
-	Inputs  []string
-	Outputs []string
-	Errors  []error
-}
+type noopRunner struct{}
 
-func (r *setupScriptedRunner) Run(_ context.Context, name string, args []string, stdin io.Reader, stdout, _ io.Writer) error {
-	r.Calls = append(r.Calls, execx.Invocation{Name: name, Args: append([]string(nil), args...)})
-	var input bytes.Buffer
-	if stdin != nil {
-		_, _ = io.Copy(&input, stdin)
-	}
-	r.Inputs = append(r.Inputs, input.String())
-	index := len(r.Calls) - 1
-	if index < len(r.Outputs) && stdout != nil {
-		_, _ = io.WriteString(stdout, r.Outputs[index])
-	}
-	if index < len(r.Errors) {
-		return r.Errors[index]
-	}
+func (noopRunner) Run(context.Context, string, []string, io.Reader, io.Writer, io.Writer) error {
 	return nil
 }
 
-func validLibvirtQEMUConfig() []byte {
-	return []byte(`seccomp_sandbox = 1
-namespaces = [ "mount" ]
-cgroup_controllers = [ "devices" ]
-`)
+type cliProvider struct {
+	autostartCalls []string
+	autostartErr   error
 }
 
-func lookupCommands(names ...string) func(string) (string, error) {
-	available := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		available[name] = struct{}{}
-	}
-	return func(name string) (string, error) {
-		if _, ok := available[name]; ok {
-			return "/test/bin/" + filepath.Base(name), nil
-		}
-		return "", errors.New("not found")
-	}
+func (*cliProvider) Name() string                               { return "lima" }
+func (*cliProvider) Available(context.Context) error            { return nil }
+func (*cliProvider) Create(context.Context, backend.Spec) error { return nil }
+func (*cliProvider) Start(context.Context, string) error        { return nil }
+func (*cliProvider) Stop(context.Context, string) error         { return nil }
+func (*cliProvider) Status(_ context.Context, name string) (backend.Status, error) {
+	return backend.Status{Name: name, Provider: "lima", Lifecycle: model.StatusStopped}, nil
+}
+func (*cliProvider) Logs(context.Context, string, io.Writer, io.Writer) error { return nil }
+func (*cliProvider) Destroy(context.Context, string) error                    { return nil }
+func (*cliProvider) Upgrade(context.Context, string, backend.Spec) error      { return nil }
+func (*cliProvider) Exec(context.Context, string, []string, io.Reader, io.Writer, io.Writer) error {
+	return nil
+}
+func (*cliProvider) SyncProfile(context.Context, backend.Spec, bool) error { return nil }
+func (*cliProvider) PurgeProfile(context.Context, backend.Spec) error      { return nil }
+func (*cliProvider) RefreshAgentInstructions(context.Context, string, string) error {
+	return nil
+}
+func (*cliProvider) ConfigureForwarding(context.Context, backend.Spec) error { return nil }
+func (*cliProvider) ExecAsUser(context.Context, string, string, []string, io.Reader, io.Writer, io.Writer) error {
+	return nil
+}
+func (*cliProvider) ExecAsRoot(context.Context, string, []string, io.Reader, io.Writer, io.Writer) error {
+	return nil
+}
+func (p *cliProvider) EnableAutostart(_ context.Context, name string) error {
+	p.autostartCalls = append(p.autostartCalls, "enable "+name)
+	return p.autostartErr
+}
+func (p *cliProvider) DisableAutostart(_ context.Context, name string) error {
+	p.autostartCalls = append(p.autostartCalls, "disable "+name)
+	return p.autostartErr
 }
 
-func TestMissingPrerequisitePackagesOnlyReturnsUnprobedPackages(t *testing.T) {
-	app := &App{
-		LookPath: lookupCommands(
-			"qemu-system-x86_64", "qemu-img", "libvirtd", "virtqemud", "virsh", "virt-install",
-			"brctl", "dnsmasq", "cloud-localds", "nft",
-		),
-		PathExists: func(path string) bool { return path == "/usr/share/OVMF/OVMF_CODE.fd" },
-	}
-
-	missing := app.missingPrerequisitePackages("ubuntu")
-	if len(missing) != 0 {
-		t.Fatalf("complete prerequisite set was considered missing: %v", missing)
-	}
-
-	app.LookPath = lookupCommands("qemu-img", "libvirtd", "virtqemud", "virsh", "virt-install", "brctl", "dnsmasq", "cloud-localds", "nft")
-	missing = app.missingPrerequisitePackages("ubuntu")
-	if !containsPackage(missing, "qemu-system") {
-		t.Fatalf("missing qemu-system was not reported: %v", missing)
-	}
-	if containsPackage(missing, "qemu-system-x86") {
-		t.Fatalf("implementation package leaked into prerequisite list: %v", missing)
-	}
-}
-
-func TestApplySetupSkipsPackageManagerWhenPrerequisitesExist(t *testing.T) {
-	runner := &execx.RecordingRunner{}
-	app := &App{
-		Out:    &bytes.Buffer{},
-		Runner: runner,
-		ReadFile: func(string) ([]byte, error) {
-			return validLibvirtQEMUConfig(), nil
-		},
-		LookPath: lookupCommands(
-			"qemu-system-x86_64", "qemu-img", "libvirtd", "virtqemud", "virsh", "virt-install",
-			"brctl", "dnsmasq", "cloud-localds", "nft",
-		),
-		PathExists: func(path string) bool { return path == "/usr/share/OVMF/OVMF_CODE.fd" },
-	}
-
-	if err := app.applySetup(context.Background(), host.Info{OS: "linux", Distribution: "ubuntu"}, setupPlan(host.Info{OS: "linux", Distribution: "ubuntu"})); err != nil {
+func TestChangeAutostartPersistsOnlySuccessfulRegistration(t *testing.T) {
+	ctx := context.Background()
+	config := model.DefaultConfig(t.TempDir())
+	store := state.NewStore(config.StateDir)
+	initial := state.State{Name: config.VMName, Provider: "lima", Lifecycle: model.StatusStopped}
+	if err := store.Save(initial); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.Calls) != 0 {
-		t.Fatalf("package manager ran despite complete prerequisites: %+v", runner.Calls)
-	}
-}
-
-func TestApplySetupSkipsLimaInstallWhenLimaExists(t *testing.T) {
-	runner := &execx.RecordingRunner{}
-	app := &App{
-		Out:      &bytes.Buffer{},
-		Runner:   runner,
-		LookPath: lookupCommands("limactl", "brew"),
-	}
-	info := host.Info{OS: "darwin", Architecture: "arm64"}
-	if err := app.applySetup(context.Background(), info, setupPlan(info)); err != nil {
+	app := &App{Out: io.Discard, Err: io.Discard}
+	provider := &cliProvider{}
+	if err := app.changeAutostart(ctx, provider, config, store, true); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.Calls) != 0 {
-		t.Fatalf("Lima package manager ran despite limactl being present: %+v", runner.Calls)
+	value, err := store.Load(config.VMName)
+	if err != nil || value.Autostart == nil || !value.Autostart.Enabled {
+		t.Fatalf("state=%+v err=%v", value, err)
 	}
-}
-
-func TestApplySetupInstallsOnlyMissingUbuntuPackages(t *testing.T) {
-	runner := &execx.RecordingRunner{}
-	app := &App{
-		Out:    &bytes.Buffer{},
-		Runner: runner,
-		ReadFile: func(string) ([]byte, error) {
-			return validLibvirtQEMUConfig(), nil
-		},
-		LookPath:   lookupCommands(),
-		PathExists: func(string) bool { return false },
-	}
-	info := host.Info{OS: "linux", Distribution: "ubuntu"}
-	if err := app.applySetup(context.Background(), info, setupPlan(info)); err != nil {
+	if err := app.changeAutostart(ctx, provider, config, store, false); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.Calls) != 1 {
-		t.Fatalf("expected one conditional apt invocation, got %+v", runner.Calls)
+	value, err = store.Load(config.VMName)
+	if err != nil || value.Autostart != nil {
+		t.Fatalf("state=%+v err=%v", value, err)
 	}
-	call := runner.Calls[0]
-	if call.Name != "sudo" || len(call.Args) < 4 || call.Args[0] != "apt-get" || call.Args[1] != "install" || call.Args[2] != "-y" {
-		t.Fatalf("unexpected package-manager invocation: %+v", call)
+	if got := strings.Join(provider.autostartCalls, ","); got != "enable agents,disable agents" {
+		t.Fatalf("calls=%q", got)
 	}
-	if !containsString(call.Args, "qemu-system") {
-		t.Fatalf("Ubuntu meta-package was not requested: %+v", call.Args)
-	}
-	if containsString(call.Args, "qemu-system-x86") {
-		t.Fatalf("Ubuntu implementation package was requested: %+v", call.Args)
-	}
-}
 
-func TestMissingArchPrerequisitePackagesReportsOnlyMissing(t *testing.T) {
-	app := &App{LookPath: lookupCommands(
-		"qemu-system-x86_64", "qemu-img", "libvirtd", "virsh", "virt-install",
-		"dnsmasq", "cloud-localds", "nft",
-	)}
-
-	missing := app.missingPrerequisitePackages("arch")
-	if got, want := strings.Join(missing, ","), "iptables"; got != want {
-		t.Fatalf("unexpected missing Arch packages: got %q want %q", got, want)
+	provider.autostartErr = errors.New("registration failed")
+	if err := app.changeAutostart(ctx, provider, config, store, true); err == nil {
+		t.Fatal("provider failure ignored")
 	}
-}
-
-func TestApplySetupArchSkipsPacmanWhenPrerequisitesExist(t *testing.T) {
-	runner := &execx.RecordingRunner{}
-	app := &App{
-		Out:    &bytes.Buffer{},
-		Runner: runner,
-		ReadFile: func(string) ([]byte, error) {
-			return validLibvirtQEMUConfig(), nil
-		},
-		LookPath: lookupCommands(
-			"qemu-system-x86_64", "qemu-img", "libvirtd", "virsh", "virt-install",
-			"dnsmasq", "cloud-localds", "nft", "iptables",
-		),
-	}
-	info := host.Info{OS: "linux", Architecture: "amd64", Distribution: "arch"}
-	if err := app.applySetup(context.Background(), info, setupPlan(info)); err != nil {
-		t.Fatal(err)
-	}
-	if len(runner.Calls) != 1 || strings.Contains(strings.Join(runner.Calls[0].Args, " "), "pacman") {
-		t.Fatalf("unexpected complete Arch setup calls: %+v", runner.Calls)
-	}
-	if got := strings.Join(runner.Calls[0].Args, " "); got != "systemctl enable --now libvirtd.service" {
-		t.Fatalf("libvirtd was not enabled: %s", got)
-	}
-}
-
-func TestApplySetupArchInstallsOnlyMissingPackagesAndRestartsLibvirtd(t *testing.T) {
-	runner := &setupScriptedRunner{}
-	app := &App{
-		Out:    &bytes.Buffer{},
-		Err:    &bytes.Buffer{},
-		Runner: runner,
-		ReadFile: func(string) ([]byte, error) {
-			return []byte("seccomp_sandbox = 1\n"), nil
-		},
-		LookPath: lookupCommands(
-			"qemu-system-x86_64", "qemu-img", "libvirtd", "virsh", "virt-install",
-			"dnsmasq", "cloud-localds", "nft",
-		),
-	}
-	info := host.Info{OS: "linux", Architecture: "amd64", Distribution: "arch"}
-	if err := app.applySetup(context.Background(), info, setupPlan(info)); err != nil {
-		t.Fatal(err)
-	}
-	if len(runner.Calls) != 4 {
-		t.Fatalf("unexpected Arch setup calls: %+v", runner.Calls)
-	}
-	if got := strings.Join(runner.Calls[0].Args, " "); got != "pacman --sync --needed --noconfirm iptables" {
-		t.Fatalf("unexpected pacman invocation: %s", got)
-	}
-	if got := strings.Join(runner.Calls[1].Args, " "); got != "systemctl enable --now libvirtd.service" {
-		t.Fatalf("unexpected service enable invocation: %s", got)
-	}
-	if got := strings.Join(runner.Calls[3].Args, " "); got != "systemctl restart libvirtd.service" {
-		t.Fatalf("unexpected service restart invocation: %s", got)
-	}
-}
-
-func TestEnsureLibvirtQEMUHardeningAppendsOnlyMissingSettings(t *testing.T) {
-	runner := &setupScriptedRunner{Outputs: []string{"", "loaded"}}
-	app := &App{
-		Out:    &bytes.Buffer{},
-		Err:    &bytes.Buffer{},
-		Runner: runner,
-		ReadFile: func(path string) ([]byte, error) {
-			if path != libvirtQEMUConfigPath {
-				t.Fatalf("unexpected configuration path %q", path)
-			}
-			return []byte("custom_setting = 42\n# namespaces = [ \"mount\" ]\n# cgroup_controllers = [ \"devices\" ]\nseccomp_sandbox = 1\n"), nil
-		},
-	}
-	changed, err := app.ensureLibvirtQEMUHardening(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !changed {
-		t.Fatal("missing hardening settings were not appended")
-	}
-	if got, want := runner.Inputs[0], "namespaces = [ \"mount\" ]\ncgroup_controllers = [ \"devices\" ]\n"; got != want {
-		t.Fatalf("unexpected append payload: got %q want %q", got, want)
-	}
-	if len(runner.Calls) != 3 {
-		t.Fatalf("unexpected setup calls: %+v", runner.Calls)
-	}
-	if got := strings.Join(runner.Calls[0].Args, " "); got != "tee -a /etc/libvirt/qemu.conf" {
-		t.Fatalf("unexpected append command: %s", got)
-	}
-	if got := strings.Join(runner.Calls[1].Args, " "); !strings.Contains(got, "systemctl show --property=LoadState --value virtqemud.service") {
-		t.Fatalf("unexpected service probe: %s", got)
-	}
-	if got := strings.Join(runner.Calls[2].Args, " "); got != "systemctl restart virtqemud.service" {
-		t.Fatalf("unexpected service restart: %s", got)
-	}
-}
-
-func TestEnsureLibvirtQEMUHardeningCreatesMissingConfig(t *testing.T) {
-	runner := &setupScriptedRunner{Outputs: []string{"", "loaded"}}
-	app := &App{
-		Out:    &bytes.Buffer{},
-		Err:    &bytes.Buffer{},
-		Runner: runner,
-		ReadFile: func(string) ([]byte, error) {
-			return nil, os.ErrNotExist
-		},
-	}
-	changed, err := app.ensureLibvirtQEMUHardening(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !changed || runner.Inputs[0] != "seccomp_sandbox = 1\nnamespaces = [ \"mount\" ]\ncgroup_controllers = [ \"devices\" ]\n" {
-		t.Fatalf("unexpected missing-file setup: changed=%t input=%q", changed, runner.Inputs[0])
-	}
-}
-
-func TestEnsureLibvirtQEMUHardeningLeavesExistingValuesUntouched(t *testing.T) {
-	runner := &setupScriptedRunner{}
-	app := &App{
-		Runner: runner,
-		ReadFile: func(string) ([]byte, error) {
-			return []byte(`seccomp_sandbox = 0
-namespaces = []
-cgroup_controllers = []
-`), nil
-		},
-	}
-	changed, err := app.ensureLibvirtQEMUHardening(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if changed {
-		t.Fatal("existing, conflicting settings were rewritten")
-	}
-	if len(runner.Calls) != 0 {
-		t.Fatalf("existing settings triggered host mutations: %+v", runner.Calls)
-	}
-}
-
-func TestEnsureLibvirtQEMUHardeningFallsBackToLegacyService(t *testing.T) {
-	runner := &setupScriptedRunner{
-		Outputs: []string{"", "", "loaded"},
-		Errors:  []error{nil, errors.New("virtqemud is not installed")},
-	}
-	app := &App{
-		Runner: runner,
-		ReadFile: func(string) ([]byte, error) {
-			return []byte("seccomp_sandbox = 1\n"), nil
-		},
-	}
-	if _, err := app.ensureLibvirtQEMUHardening(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.Join(runner.Calls[3].Args, " "); got != "systemctl restart libvirtd.service" {
-		t.Fatalf("unexpected legacy service restart: %s", got)
-	}
-}
-
-func TestSetupPlanRejectsUnsupportedLinuxDistro(t *testing.T) {
-	plan := setupPlan(host.Info{OS: "linux", Distribution: "debian"})
-	if len(plan) != 1 || !strings.Contains(plan[0], "unsupported") {
-		t.Fatalf("unexpected unsupported-distro plan: %v", plan)
-	}
-	plan = setupPlan(host.Info{OS: "linux", Distribution: "rocky", DistributionFamily: "fedora"})
-	if len(plan) != 1 || !strings.Contains(plan[0], "unsupported") {
-		t.Fatalf("provider family metadata bypassed distro rejection: %v", plan)
+	value, err = store.Load(config.VMName)
+	if err != nil || value.Autostart != nil {
+		t.Fatalf("failed registration changed state: %+v err=%v", value, err)
 	}
 }
 
@@ -344,34 +115,25 @@ func TestCreateConfigPromptFailsOnNonTTY(t *testing.T) {
 }
 
 func TestAuthAgentCommands(t *testing.T) {
-	tests := map[string]string{
-		"codex":    "orca account add --agent codex",
-		"claude":   "orca account add --agent claude",
-		"opencode": "opencode auth login",
-		"copilot":  "copilot login",
-		"pi":       "pi",
-	}
+	tests := map[string]string{"codex": "orca account add --agent codex", "claude": "orca account add --agent claude", "opencode": "opencode auth login", "copilot": "copilot login", "pi": "pi"}
 	for agent, want := range tests {
 		got, ok := authAgentCommand(agent)
-		if !ok {
-			t.Fatalf("authAgentCommand(%q) reported unsupported", agent)
-		}
-		if strings.Join(got, " ") != want {
-			t.Errorf("authAgentCommand(%q) = %q, want %q", agent, strings.Join(got, " "), want)
+		if !ok || strings.Join(got, " ") != want {
+			t.Errorf("authAgentCommand(%q)=(%q,%t), want %q", agent, strings.Join(got, " "), ok, want)
 		}
 	}
 	if got, ok := authAgentCommand("unknown"); ok || got != nil {
-		t.Fatalf("authAgentCommand(unknown) = (%v, %t), want (nil, false)", got, ok)
+		t.Fatalf("unknown=(%v,%t)", got, ok)
 	}
 }
 
-func containsPackage(values []string, wanted string) bool { return containsString(values, wanted) }
-
-func containsString(values []string, wanted string) bool {
-	for _, value := range values {
-		if value == wanted {
-			return true
-		}
+func TestAutostartDescriptionExplainsHostTiming(t *testing.T) {
+	app := New(bytes.NewBuffer(nil), io.Discard, io.Discard, noopRunner{})
+	command, _, err := app.Command().Find([]string{"autostart"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	return false
+	if command.Short != "Register a VM to start at Linux login or macOS boot" {
+		t.Fatalf("description = %q", command.Short)
+	}
 }

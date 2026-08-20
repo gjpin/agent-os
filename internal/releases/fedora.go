@@ -14,9 +14,7 @@ import (
 )
 
 const (
-	FedoraServerVersion = "44-1.7"
-	FedoraDownloadBase  = "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Server"
-	FedoraCloudBase     = "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud"
+	FedoraCloudBase = "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud"
 )
 
 type Image struct {
@@ -24,30 +22,6 @@ type Image struct {
 	URL          string
 	Filename     string
 	SHA256       string
-	ChecksumURL  string
-}
-
-func FedoraServer44(architecture string) (Image, error) {
-	var filename string
-	switch architecture {
-	case "x86_64":
-		filename = "Fedora-Server-Guest-Generic-44-1.7.x86_64.qcow2"
-	case "aarch64":
-		filename = "Fedora-Server-Guest-Generic-44-1.7.aarch64.qcow2"
-	default:
-		return Image{}, fmt.Errorf("Fedora Server 44 is not published for architecture %q", architecture)
-	}
-	checksums := map[string]string{
-		"x86_64":  "446c01f71e3c6cd3889af66fec927b8d1160b8e0744243d7861c2b8b2ddd3f0e",
-		"aarch64": "c2320b52a25bd961b277361b74edbeb49e8a5b45b5a1df8481865457fb577935",
-	}
-	return Image{
-		Architecture: architecture,
-		URL:          FedoraDownloadBase + "/" + architecture + "/images/" + filename,
-		Filename:     filename,
-		SHA256:       checksums[architecture],
-		ChecksumURL:  FedoraDownloadBase + "/" + architecture + "/images/Fedora-Server-44-1.7-" + architecture + "-CHECKSUM",
-	}, nil
 }
 
 func FedoraCloudBase44(architecture string) (Image, error) {
@@ -68,7 +42,6 @@ func FedoraCloudBase44(architecture string) (Image, error) {
 		URL:          FedoraCloudBase + "/" + architecture + "/images/" + filename,
 		Filename:     filename,
 		SHA256:       checksum,
-		ChecksumURL:  FedoraCloudBase + "/" + architecture + "/images/Fedora-Cloud-44-1.7-" + architecture + "-CHECKSUM",
 	}, nil
 }
 

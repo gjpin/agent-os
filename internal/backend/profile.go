@@ -9,7 +9,6 @@ import (
 	"io"
 	"math"
 	"os"
-	"path/filepath"
 	"strconv"
 
 	"github.com/gjpin/agent-os/internal/execx"
@@ -19,35 +18,29 @@ import (
 type profileInfo struct {
 	Metadata profile.Metadata
 	Store    profile.Store
-	DiskPath string
 }
 
-func profileFor(spec Spec, provider string) (profileInfo, error) {
+func profileFor(spec Spec) (profileInfo, error) {
 	if err := spec.Config.Validate(); err != nil {
 		return profileInfo{}, err
 	}
 	store := profile.NewStore(spec.Config.StateDir)
 	diskID := profile.DiskID(spec.Config.VMName)
-	diskPath, err := store.DiskPath(spec.Config.VMName)
-	if err != nil {
-		return profileInfo{}, err
-	}
 	return profileInfo{
 		Metadata: profile.Metadata{
 			SchemaVersion: profile.SchemaVersion,
-			Provider:      provider,
+			Provider:      "lima",
 			DiskID:        diskID,
 			SizeGiB:       spec.Config.ProfileDiskGiB,
 			Filesystem:    profile.Filesystem,
-			Label:         profile.DiskLabel(provider, diskID),
+			Label:         profile.DiskLabel(diskID),
 		},
-		Store:    store,
-		DiskPath: diskPath,
+		Store: store,
 	}, nil
 }
 
-func loadProfile(spec Spec, provider string) (profileInfo, profile.Metadata, bool, error) {
-	info, err := profileFor(spec, provider)
+func loadProfile(spec Spec) (profileInfo, profile.Metadata, bool, error) {
+	info, err := profileFor(spec)
 	if err != nil {
 		return profileInfo{}, profile.Metadata{}, false, err
 	}
@@ -56,7 +49,8 @@ func loadProfile(spec Spec, provider string) (profileInfo, profile.Metadata, boo
 		if existing.Provider != info.Metadata.Provider {
 			return profileInfo{}, profile.Metadata{}, false, fmt.Errorf("profile disk belongs to provider %q, refusing to use it with provider %q", existing.Provider, info.Metadata.Provider)
 		}
-		if existing.DiskID != info.Metadata.DiskID || existing.Filesystem != info.Metadata.Filesystem || existing.Label != info.Metadata.Label {
+		labelMatches := profile.DiskLabelIsCompatible(info.Metadata.DiskID, existing.Label)
+		if existing.DiskID != info.Metadata.DiskID || existing.Filesystem != info.Metadata.Filesystem || !labelMatches {
 			return profileInfo{}, profile.Metadata{}, false, errors.New("profile metadata does not match the deterministic disk identity or filesystem; refusing to overwrite data")
 		}
 		return info, existing, true, nil
@@ -74,85 +68,8 @@ func saveProfile(info profileInfo, name string, value profile.Metadata) error {
 	return nil
 }
 
-func ensureLibvirtProfile(ctx context.Context, runner execx.Runner, out, errOut io.Writer, spec Spec) error {
-	info, metadata, found, err := loadProfile(spec, "libvirt")
-	if err != nil {
-		return err
-	}
-	dir := filepath.Dir(info.DiskPath)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create profile directory: %w", err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return err
-	}
-	diskInfo, statErr := os.Lstat(info.DiskPath)
-	diskExists := statErr == nil
-	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-		return fmt.Errorf("inspect profile disk: %w", statErr)
-	}
-	if !found && diskExists {
-		return errors.New("profile disk exists without trusted metadata; refusing to overwrite it")
-	}
-	if found && !diskExists {
-		return errors.New("profile metadata exists but its disk is missing; refusing to create a replacement")
-	}
-	if diskExists && (diskInfo.Mode()&os.ModeSymlink != 0 || !diskInfo.Mode().IsRegular()) {
-		return errors.New("profile disk is not a regular file; refusing to use it")
-	}
-	if !diskExists {
-		if err := command(runner, ctx, "qemu-img", []string{"create", "-f", "qcow2", "-o", "size=" + strconv.Itoa(spec.Config.ProfileDiskGiB) + "G", info.DiskPath}, nil, out, errOut); err != nil {
-			return fmt.Errorf("create profile disk: %w", err)
-		}
-		if err := os.Chmod(info.DiskPath, 0o600); err != nil {
-			return err
-		}
-		return saveProfile(info, spec.Config.VMName, metadata)
-	}
-
-	actual, err := qemuVirtualSize(ctx, runner, info.DiskPath, errOut)
-	if err != nil {
-		return err
-	}
-	requiredGiB := spec.Config.ProfileDiskGiB
-	if metadata.SizeGiB > requiredGiB {
-		requiredGiB = metadata.SizeGiB
-	}
-	actualGiB := int(math.Ceil(float64(actual) / float64(1<<30)))
-	if actual < int64(requiredGiB)<<30 {
-		if err := command(runner, ctx, "qemu-img", []string{"resize", info.DiskPath, strconv.Itoa(requiredGiB) + "G"}, nil, out, errOut); err != nil {
-			return fmt.Errorf("grow profile disk: %w", err)
-		}
-		actualGiB = requiredGiB
-	}
-	if actualGiB > metadata.SizeGiB {
-		metadata.SizeGiB = actualGiB
-	}
-	if err := os.Chmod(info.DiskPath, 0o600); err != nil {
-		return err
-	}
-	return saveProfile(info, spec.Config.VMName, metadata)
-}
-
-func qemuVirtualSize(ctx context.Context, runner execx.Runner, path string, errOut io.Writer) (int64, error) {
-	var output bytes.Buffer
-	if err := command(runner, ctx, "qemu-img", []string{"info", "--output=json", path}, nil, &output, errOut); err != nil {
-		return 0, fmt.Errorf("inspect profile disk size: %w", err)
-	}
-	var info struct {
-		VirtualSize int64 `json:"virtual-size"`
-	}
-	if err := json.Unmarshal(output.Bytes(), &info); err != nil || info.VirtualSize < 1 {
-		if err == nil {
-			err = errors.New("missing virtual-size")
-		}
-		return 0, fmt.Errorf("invalid qemu-img size output: %w", err)
-	}
-	return info.VirtualSize, nil
-}
-
 func ensureLimaProfile(ctx context.Context, runner execx.Runner, out, errOut io.Writer, spec Spec) error {
-	info, metadata, found, err := loadProfile(spec, "lima")
+	info, metadata, found, err := loadProfile(spec)
 	if err != nil {
 		return err
 	}

@@ -21,7 +21,6 @@ import (
 const (
 	SchemaVersion = 1
 	Filesystem    = "ext4"
-	DiskFileName  = "profile.qcow2"
 	MetadataName  = "metadata.json"
 	ProfileMount  = "/var/lib/agent-os/profile"
 )
@@ -61,17 +60,6 @@ func (s Store) MetadataPath(name string) (string, error) {
 	return filepath.Join(dir, MetadataName), nil
 }
 
-// DiskPath is used by the file-backed libvirt provider. Lima stores its
-// standalone disk in Lima's own disk store, so its metadata directory has no
-// disk file at this path.
-func (s Store) DiskPath(name string) (string, error) {
-	dir, err := s.Dir(name)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, DiskFileName), nil
-}
-
 func (s Store) Load(name string) (Metadata, error) {
 	path, err := s.MetadataPath(name)
 	if err != nil {
@@ -109,7 +97,7 @@ func ValidateMetadata(value Metadata) error {
 	if value.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("unsupported profile schema version %d", value.SchemaVersion)
 	}
-	if value.Provider != "lima" && value.Provider != "libvirt" {
+	if value.Provider != "lima" {
 		return fmt.Errorf("unsupported profile provider %q", value.Provider)
 	}
 	if !validDiskID(value.DiskID) {
@@ -150,19 +138,30 @@ func DiskID(name string) string {
 	return "agent-os-profile-" + clean + "-" + suffix
 }
 
-func DiskLabel(provider, diskID string) string {
-	prefix := "virt-"
-	if provider == "lima" {
-		prefix = "lima-"
-	}
-	// ext4 filesystem labels are limited to 16 bytes. Keep a provider marker
+func DiskLabel(diskID string) string {
+	prefix := "agent-os-"
+	// ext4 filesystem labels are limited to 16 bytes. Keep an agent-os marker
 	// and the deterministic hash suffix; the full collision-resistant disk ID
-	// remains in metadata and in the provider disk identity.
+	// remains in metadata and in the Lima disk identity.
+	suffix := diskID
+	if len(suffix) > 7 {
+		suffix = suffix[len(suffix)-7:]
+	}
+	return prefix + suffix
+}
+
+func legacyDiskLabel(diskID string) string {
 	suffix := diskID
 	if len(suffix) > 11 {
 		suffix = suffix[len(suffix)-11:]
 	}
-	return prefix + suffix
+	return "lima-" + suffix
+}
+
+// DiskLabelIsCompatible accepts the current deterministic label and the
+// previous Lima-prefixed form so existing Lima profiles remain reusable.
+func DiskLabelIsCompatible(diskID, label string) bool {
+	return label == DiskLabel(diskID) || label == legacyDiskLabel(diskID)
 }
 
 func validDiskID(value string) bool {

@@ -1,9 +1,7 @@
 package artifacts
 
 import (
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/xml"
 	"fmt"
 	"net"
 	"sort"
@@ -22,6 +20,7 @@ type VMDefinition struct {
 	MemoryMiB         int
 	DiskGiB           int
 	Architecture      string
+	VMType            string
 	AccessMode        model.AccessMode
 	OrcaPort          int
 	Packages          []string
@@ -29,18 +28,12 @@ type VMDefinition struct {
 	ImagePath         string
 	BindAddress       string
 	PairingAddress    string
-	GuestAddress      string
-	MACAddress        string
-	SecurityModel     string
 	AllowedCIDRs      []string
 	AgentInstructions string
 	RepositoryKeyPath string
-	ProfileBackend    string
 	ProfileDiskID     string
 	ProfileDiskLabel  string
 	ProfileDiskFormat bool
-	ProfileDiskPath   string
-	ProfileDiskSerial string
 }
 
 func FromConfig(c model.Config, architecture string) VMDefinition {
@@ -60,96 +53,9 @@ func FromConfig(c model.Config, architecture string) VMDefinition {
 		// Orca listens on the guest NIC.
 		BindAddress:       "0.0.0.0",
 		PairingAddress:    pairingAddress,
-		GuestAddress:      LibvirtGuestAddress(c.VMName),
-		MACAddress:        LibvirtMACAddress(c.VMName),
 		AllowedCIDRs:      append([]string(nil), c.AllowedCIDRs...),
 		RepositoryKeyPath: c.RepositoryKeyPath,
 	}
-}
-
-// LibvirtXML deliberately omits graphics, audio, USB passthrough, clipboard,
-// virtiofs/9p, and host socket sharing. The disk path and network name are
-// provider-owned values, not user-interpolated shell fragments. Libvirt's
-// QEMU driver supplies the host-level seccomp, private-namespace, and device
-// cgroup controls; the backend preflights qemu.conf so those defaults have not
-// been explicitly disabled. The backend requires those settings to be present
-// in qemu.conf and verifies libvirt's native QEMU translation before defining
-// the domain. The QEMU guest-agent channel is the one host/guest control
-// channel required by the Linux management backend.
-func LibvirtXML(def VMDefinition, diskPath, cloudInitPath string) (string, error) {
-	if def.Name == "" || diskPath == "" || cloudInitPath == "" {
-		return "", fmt.Errorf("name, disk path, and cloud-init path are required")
-	}
-	if def.CPUs < 1 || def.CPUs > 8 || def.MemoryMiB < 512 || def.DiskGiB < 20 {
-		return "", fmt.Errorf("invalid VM resources")
-	}
-	name, disk, seed := xmlEscape(def.Name), xmlEscape(diskPath), xmlEscape(cloudInitPath)
-	mac := ""
-	if def.MACAddress != "" {
-		mac = fmt.Sprintf("      <mac address=\"%s\"/>\n", xmlEscape(def.MACAddress))
-	}
-	profileDisk := ""
-	if def.ProfileDiskPath != "" {
-		serial := def.ProfileDiskSerial
-		if serial == "" {
-			serial = def.ProfileDiskID
-		}
-		profileDisk = fmt.Sprintf(`
-    <disk type="file" device="disk">
-      <driver name="qemu" type="qcow2" discard="unmap"/>
-      <source file="%s"/>
-      <target dev="vdb" bus="virtio"/>
-      <serial>%s</serial>
-    </disk>`, xmlEscape(def.ProfileDiskPath), xmlEscape(serial))
-	}
-	return fmt.Sprintf(`<domain type="kvm">
-  <name>%s</name>
-  <memory unit="MiB">%d</memory>
-  <currentMemory unit="MiB">%d</currentMemory>
-  <vcpu placement="static" current="%d">%d</vcpu>
-  <features>
-    <acpi/>
-    <vmport state="off"/>
-  </features>
-  <seclabel type="dynamic" model="%s" relabel="yes"/>
-  <cpu mode="host-passthrough" check="none"/>
-  <os>
-    <type arch="%s" machine="q35">hvm</type>
-    <boot dev="hd"/>
-  </os>
-  <clock offset="utc"/>
-  <on_poweroff>destroy</on_poweroff>
-  <on_reboot>restart</on_reboot>
-  <on_crash>destroy</on_crash>
-  <devices>
-    <disk type="file" device="disk">
-      <driver name="qemu" type="qcow2" discard="unmap"/>
-      <source file="%s"/>
-      <target dev="vda" bus="virtio"/>
-    </disk>
-%s
-    <disk type="file" device="cdrom">
-      <driver name="qemu" type="raw"/>
-      <source file="%s"/>
-      <target dev="sda" bus="sata"/>
-      <readonly/>
-    </disk>
-    <interface type="network">
-%s      <source network="agent-os-nat"/>
-      <model type="virtio"/>
-      <driver name="qemu" iommu="on"/>
-    </interface>
-    <controller type="usb" index="0" model="none"/>
-    <channel type="unix">
-      <target type="virtio" name="org.qemu.guest_agent.0"/>
-    </channel>
-    <console type="pty"><target type="serial" port="0"/></console>
-    <rng model="virtio"><backend model="random">/dev/urandom</backend></rng>
-    <memballoon model="virtio"/>
-    <serial type="pty"><target type="isa-serial" port="0"/></serial>
-  </devices>
-</domain>
-`, name, def.MemoryMiB, def.MemoryMiB, def.CPUs, def.CPUs, securityModel(def.SecurityModel), architecture(def.Architecture), mac, disk, profileDisk, seed), nil
 }
 
 func architecture(value string) string {
@@ -159,28 +65,11 @@ func architecture(value string) string {
 	return value
 }
 
-func (def VMDefinition) ProfileDiskBackendFormat() bool { return def.ProfileDiskFormat }
-
-func securityModel(value string) string {
-	switch value {
-	case "apparmor", "dac":
-		return value
-	default:
-		return "selinux"
-	}
-}
-
 func memorySize(mib int) string {
 	if mib%1024 == 0 {
 		return fmt.Sprintf("%dGiB", mib/1024)
 	}
 	return fmt.Sprintf("%dMiB", mib)
-}
-
-func xmlEscape(value string) string {
-	var b strings.Builder
-	_ = xml.EscapeText(&b, []byte(value))
-	return b.String()
 }
 
 func LimaYAML(def VMDefinition) (string, error) {
@@ -200,13 +89,16 @@ func LimaYAML(def VMDefinition) (string, error) {
 		return "", fmt.Errorf("invalid package manifest: %w", err)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "arch: %s\nvmType: vz\nplain: true\nrosetta:\n  enabled: false\n  binfmt: false\ncontainerd:\n  system: false\n  user: false\n", architecture(def.Architecture))
+	if def.VMType != "qemu" && def.VMType != "vz" {
+		return "", fmt.Errorf("unsupported Lima VM type %q", def.VMType)
+	}
+	fmt.Fprintf(&b, "arch: %s\nvmType: %s\nplain: true\nrosetta:\n  enabled: false\n  binfmt: false\ncontainerd:\n  system: false\n  user: false\n", architecture(def.Architecture), def.VMType)
 	fmt.Fprintf(&b, "cpus: %d\nmemory: %s\ndisk: %dGiB\n", def.CPUs, memorySize(def.MemoryMiB), def.DiskGiB)
 	if def.ImagePath != "" {
 		fmt.Fprintf(&b, "images:\n  - location: %s\n    arch: %s\n", strconv.Quote(def.ImagePath), architecture(def.Architecture))
 	}
 	if def.ProfileDiskID != "" {
-		fmt.Fprintf(&b, "additionalDisks:\n  - name: %s\n    format: %t\n    fsType: ext4\n", strconv.Quote(def.ProfileDiskID), def.ProfileDiskBackendFormat())
+		fmt.Fprintf(&b, "additionalDisks:\n  - name: %s\n    format: %t\n    fsType: ext4\n", strconv.Quote(def.ProfileDiskID), def.ProfileDiskFormat)
 	}
 	agentInstructionsScript := provision.AgentInstructionsScript(def.AgentInstructions)
 	kindPodmanScript := provision.KindPodmanScript()
@@ -224,7 +116,7 @@ func LimaYAML(def VMDefinition) (string, error) {
 		provisioning.WriteString("install -d -m 0755 /usr/local/libexec\ncat > /usr/local/libexec/agent-os-profile-sync <<'AGENT_OS_PROFILE_SYNC'\n")
 		appendIndented(&provisioning, provision.ProfileSyncScript(), "")
 		provisioning.WriteString("AGENT_OS_PROFILE_SYNC\nchmod 0700 /usr/local/libexec/agent-os-profile-sync\ncat > /usr/local/libexec/agent-os-profile-setup <<'AGENT_OS_PROFILE_SETUP'\n")
-		appendIndented(&provisioning, provision.ProfileSetupScript(provision.ProfileMountSpec{Backend: "lima", DiskID: def.ProfileDiskID, Label: def.ProfileDiskLabel}), "")
+		appendIndented(&provisioning, provision.ProfileSetupScript(provision.ProfileMountSpec{DiskID: def.ProfileDiskID, Label: def.ProfileDiskLabel}), "")
 		provisioning.WriteString("AGENT_OS_PROFILE_SETUP\nchmod 0700 /usr/local/libexec/agent-os-profile-setup\n/bin/bash /usr/local/libexec/agent-os-profile-setup\n")
 	}
 	provisioning.WriteString("systemctl disable --now containerd.service 2>/dev/null || true\n")
@@ -302,130 +194,6 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 `
-}
-
-func CloudInit(def VMDefinition, repositoryKeyPath string) string {
-	contents, err := cloudInit(def, repositoryKeyPath)
-	if err == nil {
-		return contents
-	}
-
-	// The CLI validates the key before a normal create. Keep this legacy
-	// string-returning API safe for callers that bypass that validation: emit a
-	// usable artifact without the key, but never include the host path or the
-	// validation error in guest data. Callers that need an error can use
-	// CloudInitWithError.
-	fallbackDefinition := def
-	fallbackDefinition.RepositoryKeyPath = ""
-	fallback, fallbackErr := cloudInit(fallbackDefinition, "")
-	if fallbackErr == nil {
-		return strings.Replace(fallback, "#cloud-config\n", "#cloud-config\n# repository private key was not provisioned\n", 1)
-	}
-	return "#cloud-config\n# repository private key was not provisioned\n"
-}
-
-// CloudInitWithError is the error-returning form used by tests and callers
-// that want to fail creation rather than receive the compatibility fallback
-// from CloudInit.
-func CloudInitWithError(def VMDefinition, repositoryKeyPath string) (string, error) {
-	return cloudInit(def, repositoryKeyPath)
-}
-
-func cloudInit(def VMDefinition, repositoryKeyPath string) (string, error) {
-	if strings.TrimSpace(repositoryKeyPath) == "" {
-		repositoryKeyPath = def.RepositoryKeyPath
-	}
-	guestKeyPath, encodedKey, err := repositoryKeyData(repositoryKeyPath)
-	if err != nil {
-		return "", err
-	}
-	var b strings.Builder
-	b.WriteString("#cloud-config\n")
-	b.WriteString("users:\n  - name: agent\n    gecos: Agent\n    groups: []\n    shell: /bin/bash\n    lock_passwd: true\n    sudo: []\n")
-	b.WriteString("ssh_pwauth: false\npackages:\n")
-	packages, err := provision.PackageManifest(def.Packages)
-	if err != nil {
-		return "#cloud-config\n# invalid package manifest: " + err.Error() + "\n", nil
-	}
-	firewallArgs := optionalPort(def.OrcaPort)
-	firewallRules, err := FirewallRulesChecked(def.AllowedCIDRs, firewallArgs...)
-	if err != nil {
-		return "", fmt.Errorf("generate guest firewall: %w", err)
-	}
-	if !containsString(packages, "qemu-guest-agent") {
-		packages = append(packages, "qemu-guest-agent")
-	}
-	sort.Strings(packages)
-	for _, pkg := range packages {
-		fmt.Fprintf(&b, "  - %s\n", pkg)
-	}
-	if encodedKey != "" {
-		b.WriteString("bootcmd:\n  - [install, -d, -o, root, -g, root, -m, '0700', /etc/agent-os/keys]\n")
-	}
-	b.WriteString("write_files:\n")
-	b.WriteString("  - path: /etc/agent-os/README\n    permissions: '0644'\n    content: |\n      Managed by agent-os. Repository credentials use restricted guest permissions.\n")
-	if encodedKey != "" {
-		fmt.Fprintf(&b, "  - path: %s\n    owner: root:root\n    permissions: '0600'\n    defer: true\n    encoding: b64\n    content: |\n      %s\n", strconv.Quote(guestKeyPath), encodedKey)
-	}
-	b.WriteString("  - path: /etc/systemd/system/orca.service\n    permissions: '0644'\n    content: |\n")
-	orcaUnit := OrcaSystemdUnit(def.OrcaPort, def.BindAddress, def.PairingAddress)
-	if def.ProfileDiskID != "" {
-		orcaUnit = OrcaSystemdUnitWithProfile(def.OrcaPort, def.BindAddress, def.PairingAddress)
-	}
-	appendIndented(&b, orcaUnit, "      ")
-	b.WriteString("  - path: /usr/local/libexec/agent-os-provision-agent-instructions\n    permissions: '0700'\n    content: |\n")
-	appendIndented(&b, provision.AgentInstructionsScript(def.AgentInstructions), "      ")
-	if def.ProfileDiskID != "" {
-		b.WriteString("  - path: /usr/local/libexec/agent-os-profile-sync\n    permissions: '0700'\n    content: |\n")
-		appendIndented(&b, provision.ProfileSyncScript(), "      ")
-		b.WriteString("  - path: /usr/local/libexec/agent-os-profile-setup\n    permissions: '0700'\n    content: |\n")
-		appendIndented(&b, provision.ProfileSetupScript(provision.ProfileMountSpec{Backend: "libvirt", DiskID: def.ProfileDiskID, Label: def.ProfileDiskLabel}), "      ")
-		b.WriteString("  - path: /etc/systemd/system/agent-os-profile-restore.service\n    permissions: '0644'\n    content: |\n")
-		appendIndented(&b, provision.ProfileRestoreSystemdUnit(), "      ")
-	}
-	b.WriteString("  - path: /usr/local/libexec/agent-os-setup-kind-podman\n    permissions: '0700'\n    content: |\n")
-	appendIndented(&b, provision.KindPodmanScript(), "      ")
-	b.WriteString("  - path: /usr/local/libexec/agent-os-install-coding-agents\n    permissions: '0700'\n    content: |\n")
-	appendIndented(&b, provision.CodingAgentsScript(def.Skills), "      ")
-	b.WriteString("  - path: /etc/agent-os/firewall.rules\n    permissions: '0600'\n    content: |\n")
-	appendIndented(&b, strings.Join(firewallRules, "\n"), "      ")
-	orcaInstallScript, err := releases.OrcaInstallScript(def.Architecture)
-	if err != nil {
-		return "", err
-	}
-	b.WriteString("  - path: /usr/local/libexec/agent-os-install-orca\n    permissions: '0700'\n    content: |\n")
-	appendIndented(&b, orcaInstallScript, "      ")
-	b.WriteString("  - path: /usr/local/libexec/agent-os-install-orca-skills\n    permissions: '0700'\n    content: |\n")
-	appendIndented(&b, provision.OrcaSkillsScript(), "      ")
-	b.WriteString("  - path: /etc/systemd/system/agent-os-firewall.service\n    permissions: '0644'\n    content: |\n")
-	appendIndented(&b, FirewallSystemdUnit(), "      ")
-	if def.OrcaPort != 0 {
-		b.WriteString("  - path: /usr/local/libexec/agent-os-wait-for-orca\n    permissions: '0700'\n    content: |\n")
-		appendIndented(&b, orcaReadinessScript(def.OrcaPort), "      ")
-	}
-	b.WriteString("runcmd:\n")
-	if def.ProfileDiskID != "" {
-		b.WriteString("  - [bash, /usr/local/libexec/agent-os-profile-setup]\n")
-	}
-	b.WriteString("  - [bash, /usr/local/libexec/agent-os-provision-agent-instructions]\n")
-	b.WriteString("  - [bash, /usr/local/libexec/agent-os-setup-kind-podman]\n")
-	b.WriteString("  - [bash, /usr/local/libexec/agent-os-install-coding-agents]\n")
-	if def.ProfileDiskID != "" {
-		b.WriteString("  - [bash, /usr/local/libexec/agent-os-profile-sync, sync]\n")
-	}
-	b.WriteString("  - [bash, /usr/local/libexec/agent-os-install-orca]\n")
-	b.WriteString("  - [bash, /usr/local/libexec/agent-os-install-orca-skills]\n")
-	b.WriteString("  - [systemctl, daemon-reload]\n")
-	if def.ProfileDiskID != "" {
-		b.WriteString("  - [systemctl, enable, --now, agent-os-profile-restore.service]\n")
-	}
-	b.WriteString("  - [systemctl, enable, --now, agent-os-firewall.service]\n")
-	b.WriteString("  - [systemctl, enable, --now, qemu-guest-agent.service]\n")
-	b.WriteString("  - [systemctl, enable, --now, orca.service]\n")
-	if def.OrcaPort != 0 {
-		b.WriteString("  - [bash, /usr/local/libexec/agent-os-wait-for-orca]\n")
-	}
-	return b.String(), nil
 }
 
 func repositoryKeyData(repositoryKeyPath string) (guestPath, encoded string, err error) {
@@ -573,25 +341,6 @@ func OrcaSystemdUnitWithProfile(port int, bindAddress string, pairingAddress ...
 	)
 }
 
-func LibvirtNetworkXML(definitions ...VMDefinition) string {
-	dhcpHost := ""
-	if len(definitions) > 0 && definitions[0].MACAddress != "" && definitions[0].GuestAddress != "" {
-		dhcpHost = fmt.Sprintf("    <host mac=\"%s\" name=\"%s\" ip=\"%s\"/>\n",
-			xmlEscape(definitions[0].MACAddress), xmlEscape(definitions[0].Name), xmlEscape(definitions[0].GuestAddress))
-	}
-	return fmt.Sprintf(`<network>
-  <name>agent-os-nat</name>
-  <forward mode="nat"/>
-  <bridge name="agent-os0" stp="on" delay="0"/>
-  <domain name="agent-os.internal" localOnly="yes"/>
-  <ip address="192.168.240.1" netmask="255.255.255.0">
-    <dhcp><range start="192.168.240.10" end="192.168.240.240"/>
-%s    </dhcp>
-  </ip>
-</network>
-`, dhcpHost)
-}
-
 func LimaPortForward(c model.Config) string {
 	hostIP := "127.0.0.1"
 	if c.AccessMode == model.AccessWireGuard {
@@ -603,32 +352,16 @@ func LimaPortForward(c model.Config) string {
 	return fmt.Sprintf("portForwards:\n  - guestPort: %d\n    hostPort: %d\n    hostIP: %s\n    guestIP: 0.0.0.0\n    guestIPMustBeZero: false\n    static: true\n", c.OrcaPort, c.OrcaPort, strconv.Quote(hostIP))
 }
 
-func FirewallRules(allowedCIDRs []string, orcaPort ...int) []string {
-	// Preserve the historical best-effort API: an omitted or out-of-range
-	// optional port simply omits the ingress rule. Artifact generators use the
-	// checked form below, so invalid configuration still fails creation.
-	if len(orcaPort) > 1 {
-		orcaPort = orcaPort[:1]
-	}
-	if len(orcaPort) == 1 && (orcaPort[0] < 1 || orcaPort[0] > 65535) {
-		orcaPort = nil
-	}
-	rules, err := firewallRules(allowedCIDRs, orcaPort, false)
-	if err != nil {
-		return nil
-	}
-	return rules
-}
-
 // FirewallRulesChecked returns an nftables ruleset in the native script
 // format accepted by `nft -f`. It rejects invalid ports or CIDRs so callers
 // that are creating guest artifacts cannot accidentally interpolate arbitrary
 // text into a firewall rule.
+
 func FirewallRulesChecked(allowedCIDRs []string, orcaPort ...int) ([]string, error) {
-	return firewallRules(allowedCIDRs, orcaPort, true)
+	return firewallRules(allowedCIDRs, orcaPort)
 }
 
-func firewallRules(allowedCIDRs []string, orcaPort []int, rejectInvalidCIDR bool) ([]string, error) {
+func firewallRules(allowedCIDRs []string, orcaPort []int) ([]string, error) {
 	if len(orcaPort) > 1 {
 		return nil, fmt.Errorf("Orca port may be specified at most once")
 	}
@@ -649,10 +382,7 @@ func firewallRules(allowedCIDRs []string, orcaPort []int, rejectInvalidCIDR bool
 		}
 		_, network, err := net.ParseCIDR(value)
 		if err != nil {
-			if rejectInvalidCIDR {
-				return nil, fmt.Errorf("invalid allowed CIDR %q", value)
-			}
-			continue
+			return nil, fmt.Errorf("invalid allowed CIDR %q", value)
 		}
 		value = network.String()
 		if _, ok := seen[value]; ok {
@@ -694,125 +424,6 @@ func firewallRules(allowedCIDRs []string, orcaPort []int, rejectInvalidCIDR bool
 	return rules, nil
 }
 
-// LibvirtGuestAddress and LibvirtMACAddress provide a stable DHCP reservation
-// for each VM. Host forwarding must target the guest's address, and querying a
-// lease after every boot would leave a window where the VM is unreachable.
-func LibvirtGuestAddress(name string) string {
-	digest := sha256.Sum256([]byte(name))
-	return fmt.Sprintf("192.168.240.%d", 10+int(digest[0])%231)
-}
-
-func LibvirtMACAddress(name string) string {
-	digest := sha256.Sum256([]byte(name))
-	return fmt.Sprintf("52:54:00:%02x:%02x:%02x", digest[0], digest[1], digest[2])
-}
-
-func ForwardingTableName(name string) string {
-	digest := sha256.Sum256([]byte(name))
-	return fmt.Sprintf("agent_os_fwd_%x", digest[:6])
-}
-
-// AutostartIdentifier is deliberately derived only from the VM name. It is
-// safe to use in systemd unit names and host file names without interpolating
-// operator-controlled text into either artifact.
-func AutostartIdentifier(name string) string {
-	digest := sha256.Sum256([]byte(name))
-	return fmt.Sprintf("agent-os-%x", digest[:8])
-}
-
-func LibvirtAutostartUnitName(name string) string {
-	return "agent-os-autostart-" + AutostartIdentifier(name) + ".service"
-}
-
-func LibvirtAutostartUnitPath(name string) string {
-	return "/etc/systemd/system/" + LibvirtAutostartUnitName(name)
-}
-
-func LibvirtAutostartRulesPath(name string) string {
-	return "/etc/agent-os/autostart-" + AutostartIdentifier(name) + ".nft"
-}
-
-// LibvirtAutostartSystemdUnit restores the host-side forwarding rules at
-// boot. All dynamic values are hash-derived identifiers or fixed validated
-// paths; the unit contains direct executable invocations and never a shell.
-func LibvirtAutostartSystemdUnit(name string) string {
-	unit := LibvirtAutostartUnitName(name)
-	rulesPath := LibvirtAutostartRulesPath(name)
-	table := ForwardingTableName(name)
-	return fmt.Sprintf(`[Unit]
-Description=agent-os host forwarding for %s
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/sbin/sysctl -w net.ipv4.ip_forward=1
-ExecStart=/usr/sbin/nft -f %s
-ExecStop=-/usr/sbin/nft delete table ip %s
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-`, unit, rulesPath, table)
-}
-
-// LinuxForwardingRules returns an IPv4 nftables ruleset for the selected host
-// endpoint. The libvirt network is IPv4-only, so reject an IPv6 WireGuard
-// address explicitly instead of installing a rule that can never work.
-func LinuxForwardingRules(c model.Config, guestAddress string) (string, error) {
-	guestIP := net.ParseIP(addressHostPart(guestAddress)).To4()
-	if guestIP == nil {
-		return "", fmt.Errorf("libvirt guest address must be IPv4")
-	}
-	if c.OrcaPort < 1 || c.OrcaPort > 65535 {
-		return "", fmt.Errorf("invalid Orca port %d", c.OrcaPort)
-	}
-	if c.AccessMode == model.AccessWireGuard {
-		if !validInterfaceName(c.WireGuardInterface) {
-			return "", fmt.Errorf("invalid WireGuard interface %q", c.WireGuardInterface)
-		}
-		if net.ParseIP(addressHostPart(c.WireGuardAddress)).To4() == nil {
-			return "", fmt.Errorf("Linux forwarding requires an IPv4 WireGuard address")
-		}
-	}
-
-	guest := guestIP.String()
-	table := ForwardingTableName(c.VMName)
-	lines := []string{
-		fmt.Sprintf("table ip %s {", table),
-		"  chain prerouting {",
-		"    type nat hook prerouting priority -100; policy accept;",
-	}
-	if c.AccessMode == model.AccessWireGuard {
-		lines = append(lines, fmt.Sprintf("    iifname %q ip daddr %s tcp dport %d dnat to %s:%d", c.WireGuardInterface, addressHostPart(c.WireGuardAddress), c.OrcaPort, guest, c.OrcaPort))
-	}
-	lines = append(lines,
-		"  }",
-		"  chain output {",
-		"    type nat hook output priority -100; policy accept;",
-	)
-	if c.AccessMode == model.AccessLocal {
-		lines = append(lines, fmt.Sprintf("    ip daddr 127.0.0.1 tcp dport %d dnat to %s:%d", c.OrcaPort, guest, c.OrcaPort))
-	}
-	lines = append(lines,
-		"  }",
-		"  chain postrouting {",
-		"    type nat hook postrouting priority 100; policy accept;",
-		fmt.Sprintf("    oifname \"agent-os0\" ip daddr %s tcp dport %d masquerade", guest, c.OrcaPort),
-		"  }",
-		"  chain forward {",
-		"    type filter hook forward priority -50; policy accept;",
-		"    ct state established,related accept",
-	)
-	if c.AccessMode == model.AccessWireGuard {
-		lines = append(lines, fmt.Sprintf("    iifname %q oifname \"agent-os0\" ip daddr %s tcp dport %d accept", c.WireGuardInterface, guest, c.OrcaPort))
-	} else {
-		lines = append(lines, fmt.Sprintf("    ip saddr 127.0.0.1 oifname \"agent-os0\" ip daddr %s tcp dport %d accept", guest, c.OrcaPort))
-	}
-	lines = append(lines, "  }", "}", "")
-	return strings.Join(lines, "\n"), nil
-}
-
 func addressHostPart(value string) string {
 	if slash := strings.IndexByte(value, '/'); slash >= 0 {
 		return value[:slash]
@@ -849,12 +460,4 @@ ExecReload=/usr/sbin/nft -f /etc/agent-os/firewall.rules
 [Install]
 WantedBy=multi-user.target
 `
-}
-
-func PackageManifest(packages []string) []string {
-	result, err := provision.PackageManifest(packages)
-	if err != nil {
-		return nil
-	}
-	return result
 }

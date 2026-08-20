@@ -1,389 +1,109 @@
-# Remote quick start
+# Quickstart
 
-## Table of contents
+`agent-os` supports x86_64 Linux through Lima/QEMU and Apple Silicon macOS
+through Lima/VZ. It does not install or configure host packages.
 
-- [Remote setup](#remote-quick-start)
-  - [Configure and start the VM](#configure-and-start-the-vm)
-  - [Connect with VS Code Remote SSH](#connect-with-vs-code-remote-ssh)
-  - [Connect Remote Orca](#connect-remote-orca)
-- [Authenticate coding agents](#authenticate-coding-agents)
-- [Local Apple Silicon macOS setup](#run-and-access-the-vm-locally-on-apple-silicon-macos)
-  - [VS Code on the local VM](#vs-code-on-the-local-vm)
-  - [Local Remote Orca](#local-remote-orca)
+## Debian x86_64 host
 
-This guide assumes `agent-os` is installed on a remote Linux server and that
-the server and laptop are connected by WireGuard.
-
-Example values used below:
-
-- Server WireGuard address: `10.44.0.1/24`
-- Laptop WireGuard address: `10.44.0.2/24`
-- WireGuard interface on the server: `wg0`
-- Server login user: `ops`
-- VM name: `agents`
-- Orca port: `6768`
-
-Replace these values with the ones from your WireGuard configuration.
-
-## Configure and start the VM
-
-Run these commands on the remote server as the account that owns the
-`agent-os` state and can use `sudo`. Do not run the application itself with
-`sudo`, because that can select a different configuration and state directory.
-
-If the configuration does not exist, initialize it:
+Install QEMU and the utilities used to download the upstream Lima release:
 
 ```sh
-agent-os config init
-$EDITOR ~/.config/agent-os/config.yaml
+sudo apt-get update
+sudo apt-get install -y qemu-system-x86 qemu-utils curl jq
 ```
 
-Set the access-related values in the configuration:
-
-```yaml
-vm:
-  name: agents
-
-access:
-  mode: wireguard
-
-orca:
-  port: 6768
-
-wireguard:
-  interface: wg0
-  address: 10.44.0.1/24
-```
-
-`wireguard.address` is the server's WireGuard address, not the laptop's.
-
-Review host prerequisites and validate the configuration:
+Install Lima 2.2 or newer from the official release archive. The archive
+contains `limactl` and its supporting files, so extract the whole archive rather
+than copying only the executable:
 
 ```sh
-agent-os setup-host
-agent-os config validate
+LIMA_VERSION="$(curl -fsSL https://api.github.com/repos/lima-vm/lima/releases/latest | jq -r .tag_name)"
+curl -fsSL "https://github.com/lima-vm/lima/releases/download/${LIMA_VERSION}/lima-${LIMA_VERSION#v}-Linux-x86_64.tar.gz" \
+  | sudo tar -C /usr/local -xz
 ```
 
-If prerequisites are missing, apply the supported host setup:
+Verify the installation and QEMU driver:
 
 ```sh
-agent-os setup-host --apply --yes
+limactl --version
+qemu-system-x86_64 --version
+test -r /dev/kvm && test -w /dev/kvm
 ```
 
-Create the VM once, then start it:
+If the KVM check fails because of group permissions, add your user to Debian's
+`kvm` group and log out and back in before retrying:
 
 ```sh
-agent-os create agents
-agent-os start agents
-agent-os status agents
+sudo usermod -aG kvm "$USER"
 ```
 
-The first start can take up to 30 minutes while Fedora, the coding agents,
-including Antigravity CLI, Orca, and the shared skills are installed.
+Lima recommends QEMU 6.2 or newer on Linux. The generated VM uses the host's
+native x86_64 architecture and explicitly selects `vmType: qemu`.
 
-For automatic startup after a server reboot:
+## Apple Silicon macOS host
 
-```sh
-agent-os autostart enable agents
-```
-
-If the VM was originally created with `access.mode: local`, recreate it after
-changing the access mode so that the guest Orca service receives the new
-pairing address:
-
-```sh
-agent-os stop agents
-agent-os destroy --yes agents
-agent-os create agents
-agent-os start agents
-```
-
-The ordinary `destroy` command retains the persistent profile disk. Do not use
-`--purge-profiles` unless you also want to delete the VM's settings, sessions,
-skills, and authentication state.
-
-## Connect with VS Code Remote SSH
-
-The WireGuard tunnel lets the laptop SSH to the remote server without exposing
-SSH publicly. Add an entry to `~/.ssh/config` on the laptop:
-
-```sshconfig
-Host agents-server
-    HostName 10.44.0.1
-    User ops
-    IdentityFile ~/.ssh/id_ed25519
-    IdentitiesOnly yes
-    ServerAliveInterval 30
-```
-
-Test the connection:
-
-```sh
-ssh agents-server
-```
-
-In VS Code, install **Remote - SSH**, then use:
-
-```text
-Remote-SSH: Connect to Host... → agents-server
-```
-
-This connects VS Code to the remote server. From the VS Code terminal, the
-VM's supported interactive shell is:
-
-```sh
-agent-os status agents
-agent-os ssh agents
-```
-
-The current VM setup does not expose the guest as a normal SSH target. The
-`agent-os ssh` command uses the VM's management channel, and the host-side
-WireGuard forwarding exposes Orca's port, not guest SSH port 22. Therefore,
-do not configure VS Code Remote SSH to connect to `10.44.0.1:6768`; port
-`6768` is Orca's WebSocket endpoint.
-
-For a full VS Code session directly inside the VM, the VM would need explicit
-SSH-server provisioning and guest SSH port forwarding. Remote Orca is the
-supported full-workspace interface for the current setup.
-
-## Connect Remote Orca
-
-`agent-os` starts Orca inside the VM automatically. It uses the WireGuard
-address as Orca's advertised pairing address and port `6768`.
-
-On the remote server, retrieve the Orca startup output:
-
-```sh
-agent-os logs agents
-```
-
-Look for a block like:
-
-```text
-Advertised endpoint: ws://10.44.0.1:6768
-Pairing URL: orca://pair?code=...
-```
-
-If needed, inspect the service from inside the VM:
-
-```sh
-agent-os ssh agents -- systemctl status orca.service --no-pager
-```
-
-On the laptop, open Orca and choose:
-
-```text
-Settings → Remote Orca Servers → Add Server
-```
-
-Paste the complete `orca://pair?...` URL and connect. The pairing URL grants
-access to the Orca runtime, so treat it like a password.
-
-Test the WireGuard-to-Orca network path from the laptop with:
-
-```sh
-nc -vz 10.44.0.1 6768
-```
-
-If this fails, verify that:
-
-- WireGuard is up on both machines and the laptop routes the server's tunnel
-  address through the tunnel;
-- the server's host firewall permits TCP `6768` on `wg0`;
-- the WireGuard peer configuration permits the laptop's tunnel address; and
-- the VM is running with `agent-os status agents`.
-
-Do not start a second `orca serve` process on the server host. The configured
-Orca service runs inside the `agents` VM.
-
-## Authenticate coding agents
-
-The VM must be running before you authenticate an agent. Run these commands as
-the normal `agent-os` operator account:
-
-- In the remote setup, SSH to the server first, then run the command there.
-- In the local macOS setup, run the command directly on the Mac.
-
-```sh
-agent-os status agents
-agent-os start agents              # only if the VM is stopped
-```
-
-Each command starts an interactive login inside the VM:
-
-| Agent | Command | Login flow |
-| --- | --- | --- |
-| Codex | `agent-os auth codex` | Orca opens the Codex account flow. Follow its device or browser instructions. |
-| Claude | `agent-os auth claude` | Orca opens the Claude account flow. Follow its device or browser instructions. |
-| OpenCode | `agent-os auth opencode` | Complete the provider login shown by OpenCode. |
-| GitHub Copilot | `agent-os auth copilot` | Complete the device login shown by Copilot. |
-| Pi | `agent-os auth pi` | Pi starts in the terminal; enter `/login`, then complete the provider login. |
-
-For example, on a remote server:
-
-```sh
-ssh agents-server
-agent-os auth codex
-```
-
-On the local Mac, use the same command without SSH:
-
-```sh
-agent-os auth codex
-```
-
-Authentication state is stored inside the VM's persistent agent profile. It
-survives an ordinary VM stop, start, or destroy/recreate cycle with the same
-VM name. It is deleted only when the profile is explicitly purged:
-
-```sh
-agent-os destroy --yes --purge-profiles agents
-```
-
-The host's coding-agent authentication databases are not copied into the VM.
-
-Google Antigravity CLI is available as `agy`. Start its interactive terminal
-client inside the VM with:
-
-```sh
-agent-os ssh agents -- agy
-```
-
-## Run and access the VM locally on Apple Silicon macOS
-
-On Apple Silicon macOS, `agent-os` uses Lima with Apple's
-Virtualization.framework. This is a local setup: the VM and its Orca endpoint
-run on your Mac.
-
-This backend requires Apple Silicon. Intel macOS is not supported by the
-current project.
-
-Install Lima if it is not already installed, then verify the host setup:
+Install Lima 2.2 or newer, then verify it:
 
 ```sh
 brew install lima
-agent-os setup-host
+limactl --version
 ```
 
-Create a local configuration if necessary:
+The generated VM uses the native ARM64 architecture and explicitly selects
+`vmType: vz` for Virtualization.framework.
+
+## Build and create a VM
 
 ```sh
-agent-os config init
-$EDITOR ~/.config/agent-os/config.yaml
+go build -o bin/agent-os .
+bin/agent-os create agents
+bin/agent-os start agents
+bin/agent-os verify agents
 ```
 
-Use local access mode:
-
-```yaml
-vm:
-  name: agents
-
-access:
-  mode: local
-
-orca:
-  port: 6768
-```
-
-Validate and create the VM on the Mac:
+Useful lifecycle commands:
 
 ```sh
-agent-os config validate
-agent-os create agents
-agent-os start agents
-agent-os status agents
+bin/agent-os status agents
+bin/agent-os ssh agents
+bin/agent-os logs agents
+bin/agent-os stop agents
+bin/agent-os destroy --yes agents
+bin/agent-os destroy --yes --purge-profiles agents
 ```
 
-The first start can take up to 30 minutes while the Fedora guest and its
-tools are provisioned. The VM's persistent profile is stored in Lima's disk
-store and is retained across an ordinary VM destroy/recreate cycle.
+The normal destroy operation retains the Lima-managed profile disk. Use
+`--purge-profiles` only when the retained agent profile should also be deleted.
 
-Open an interactive shell as the unprivileged `agent` user with:
+## Autostart
+
+Lima 2.2 or newer is required:
 
 ```sh
-agent-os ssh agents
+bin/agent-os autostart enable agents
+bin/agent-os autostart status agents
+bin/agent-os autostart disable agents
 ```
 
-Run a single command in the VM with:
+On Linux, enable registers upstream Lima login autostart as a systemd user
+service. The VM starts when that user logs in. On macOS, agent-os requests
+Lima's boot condition, which registers a system LaunchDaemon and may prompt for
+administrator authorization. Disabling uses the same cross-platform Lima
+command.
+
+For direct inspection:
 
 ```sh
-agent-os ssh agents -- pwd
-agent-os ssh agents -- systemctl status orca.service --no-pager
-```
-
-You can also use Lima directly for provider-level inspection:
-
-```sh
-limactl list agents
+limactl list
+limactl disk list
 limactl shell agents
 ```
 
-To stop and restart the VM:
+Existing libvirt VMs, state, and profile disks are not migrated or cleaned up.
+Non-Lima state and profile metadata is rejected.
 
-```sh
-agent-os stop agents
-agent-os start agents
-```
+## References
 
-To start it automatically when you log in or boot the Mac, use Lima 2.2 or
-newer and register autostart:
-
-```sh
-agent-os autostart enable agents
-agent-os autostart status agents
-```
-
-### VS Code on the local VM
-
-The generated Lima profile includes an SSH configuration for the VM. Add this
-to `~/.ssh/config` on the Mac:
-
-```sshconfig
-Include ~/.lima/*/ssh.config
-```
-
-Find the generated config path and test the Lima SSH alias:
-
-```sh
-limactl ls --format='{{.SSHConfigFile}}' agents
-ssh -F "$(limactl ls --format='{{.SSHConfigFile}}' agents)" lima-agents
-```
-
-Install VS Code's **Remote - SSH** extension and select
-`lima-agents` from **Remote-SSH: Connect to Host...**. This opens the VS Code
-workspace directly inside the VM.
-
-If you use a custom `LIMA_HOME`, the SSH config is under that directory rather
-than `~/.lima`; use the path printed by `limactl ls` when configuring VS Code.
-
-### Local Remote Orca
-
-In local mode, `agent-os` forwards the VM's Orca port to the Mac at
-`127.0.0.1:6768`. Get the pairing URL with:
-
-```sh
-agent-os logs agents
-```
-
-Look for:
-
-```text
-Advertised endpoint: ws://127.0.0.1:6768
-Pairing URL: orca://pair?code=...
-```
-
-In the Orca desktop app on the same Mac, choose:
-
-```text
-Settings → Remote Orca Servers → Add Server
-```
-
-Paste the complete pairing URL. Verify the local endpoint if necessary:
-
-```sh
-nc -vz 127.0.0.1 6768
-```
-
-Do not use the local-mode pairing URL from another computer. `127.0.0.1`
-refers to the computer making the connection, and this setup intentionally
-does not publish Orca on the Mac's LAN.
+- [Lima installation](https://lima-vm.io/docs/installation/)
+- [Lima QEMU driver](https://lima-vm.io/docs/config/vmtype/qemu/)
+- [Lima autostart](https://lima-vm.io/docs/usage/autostart/)
