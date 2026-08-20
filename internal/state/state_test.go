@@ -92,6 +92,25 @@ func TestOlderStateFilesDecodeWithAutostartDisabled(t *testing.T) {
 	if value.Autostart != nil {
 		t.Fatalf("legacy state unexpectedly enabled autostart: %+v", value.Autostart)
 	}
+	if value.Distribution != model.DistributionFedora {
+		t.Fatalf("legacy state distribution=%q, want fedora", value.Distribution)
+	}
+}
+
+func TestDistributionIsPersistedAndValidated(t *testing.T) {
+	store := NewStore(t.TempDir())
+	value := State{Name: "agents", Provider: "lima", Distribution: model.DistributionDebian, Lifecycle: model.StatusStopped}
+	if err := store.Save(value); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Load("agents")
+	if err != nil || loaded.Distribution != model.DistributionDebian {
+		t.Fatalf("loaded=%+v err=%v", loaded, err)
+	}
+	value.Distribution = "other"
+	if err := store.Save(value); err == nil {
+		t.Fatal("saved unsupported distribution")
+	}
 }
 
 func TestRejectsNonLimaProvider(t *testing.T) {

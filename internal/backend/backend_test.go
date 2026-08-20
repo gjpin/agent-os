@@ -187,11 +187,15 @@ func TestLimaGuestOperationsUseLimactlShell(t *testing.T) {
 }
 
 func TestLimaDryRunWritesHostSpecificArtifactWithoutCommands(t *testing.T) {
-	for _, tc := range []struct{ driver, arch string }{{"qemu", "x86_64"}, {"vz", "aarch64"}} {
+	for _, tc := range []struct {
+		driver, arch string
+		distribution model.Distribution
+		imagePart    string
+	}{{"qemu", "x86_64", model.DistributionFedora, "Fedora-Cloud-Base"}, {"vz", "aarch64", model.DistributionDebian, "debian-sid-genericcloud-arm64"}} {
 		dir := t.TempDir()
 		r := &scriptedRunner{}
 		config := model.DefaultConfig(dir)
-		if err := (Lima{Runner: r, VMType: tc.driver}).Create(context.Background(), Spec{Config: config, Architecture: tc.arch, DryRun: true}); err != nil {
+		if err := (Lima{Runner: r, VMType: tc.driver}).Create(context.Background(), Spec{Config: config, Distribution: tc.distribution, Architecture: tc.arch, DryRun: true}); err != nil {
 			t.Fatal(err)
 		}
 		data, err := os.ReadFile(filepath.Join(dir, "v1", "vms", config.VMName, "artifacts", "lima.yaml"))
@@ -199,7 +203,7 @@ func TestLimaDryRunWritesHostSpecificArtifactWithoutCommands(t *testing.T) {
 			t.Fatal(err)
 		}
 		text := string(data)
-		if !strings.Contains(text, "vmType: "+tc.driver) || !strings.Contains(text, "arch: "+tc.arch) {
+		if !strings.Contains(text, "vmType: "+tc.driver) || !strings.Contains(text, "arch: "+tc.arch) || !strings.Contains(text, tc.imagePart) {
 			t.Fatalf("artifact for %s/%s:\n%s", tc.driver, tc.arch, text)
 		}
 		if len(r.calls) != 0 {

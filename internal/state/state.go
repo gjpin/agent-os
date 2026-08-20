@@ -17,12 +17,13 @@ import (
 const SchemaVersion = 1
 
 type State struct {
-	SchemaVersion int            `json:"schema_version"`
-	Name          string         `json:"name"`
-	Provider      string         `json:"provider"`
-	Lifecycle     model.VMStatus `json:"lifecycle"`
-	CreatedAt     time.Time      `json:"created_at"`
-	UpdatedAt     time.Time      `json:"updated_at"`
+	SchemaVersion int                `json:"schema_version"`
+	Name          string             `json:"name"`
+	Provider      string             `json:"provider"`
+	Distribution  model.Distribution `json:"distribution"`
+	Lifecycle     model.VMStatus     `json:"lifecycle"`
+	CreatedAt     time.Time          `json:"created_at"`
+	UpdatedAt     time.Time          `json:"updated_at"`
 	// Autostart is optional so state files written before VM autostart was
 	// introduced continue to decode as disabled. A nil value is equivalent to
 	// an explicitly disabled registration.
@@ -94,6 +95,13 @@ func (s Store) Load(name string) (State, error) {
 	if value.Provider != "lima" {
 		return State{}, fmt.Errorf("unsupported state provider %q", value.Provider)
 	}
+	// State written before multi-distribution support is necessarily Fedora.
+	if value.Distribution == "" {
+		value.Distribution = model.DistributionFedora
+	}
+	if !value.Distribution.Valid() {
+		return State{}, fmt.Errorf("unsupported state distribution %q", value.Distribution)
+	}
 	return value, nil
 }
 
@@ -109,6 +117,12 @@ func (s Store) Save(value State) error {
 	}
 	if value.Provider != "lima" {
 		return fmt.Errorf("unsupported state provider %q", value.Provider)
+	}
+	if value.Distribution == "" {
+		value.Distribution = model.DistributionFedora
+	}
+	if !value.Distribution.Valid() {
+		return fmt.Errorf("unsupported state distribution %q", value.Distribution)
 	}
 	if s.Now == nil {
 		s.Now = time.Now

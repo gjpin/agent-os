@@ -28,6 +28,26 @@ const (
 	DefaultChromeDevToolsSkillURL  = "https://github.com/ChromeDevTools/chrome-devtools-mcp/tree/main/skills/chrome-devtools-cli"
 )
 
+// Distribution identifies the guest operating system selected at VM creation.
+type Distribution string
+
+const (
+	DistributionFedora Distribution = "fedora"
+	DistributionDebian Distribution = "debian"
+)
+
+func (d Distribution) Valid() bool {
+	return d == DistributionFedora || d == DistributionDebian
+}
+
+func ParseDistribution(value string) (Distribution, error) {
+	distribution := Distribution(strings.ToLower(strings.TrimSpace(value)))
+	if !distribution.Valid() {
+		return "", fmt.Errorf("unsupported distro %q; choose fedora or debian", value)
+	}
+	return distribution, nil
+}
+
 var defaultSkills = []string{DefaultChromeDevToolsSkillURL}
 
 // DefaultSkills returns a copy of the skills installed in every new VM.
@@ -194,9 +214,9 @@ type ProfileMountSpec struct {
 	Label  string
 }
 
-// baselinePackages is the development and operations toolset guaranteed in
-// every newly provisioned VM. Configured packages are additive extras.
-var baselinePackages = strings.Fields(`
+// fedoraBaselinePackages is the canonical development and operations toolset.
+// Debian derives the same capabilities through explicit package replacements.
+var fedoraBaselinePackages = strings.Fields(`
 bash bat bats bind-utils bzip2 ca-certificates cargo chromium
 clang clang-tools-extra cmake coreutils curl diffutils fd-find file
 findutils fzf gawk gcc gcc-c++ gdb gettext-envsubst gh git git-lfs glab
@@ -220,20 +240,90 @@ moreutils parallel gnupg2 man-db man-pages
 kubernetes1.36-client helm kind kustomize opentofu
 `)
 
+var debianPackageReplacements = map[string][]string{
+	"ShellCheck":            {"shellcheck"},
+	"bind-utils":            {"bind9-dnsutils"},
+	"clang-tools-extra":     {"clang-tools"},
+	"gcc-c++":               {"g++"},
+	"gettext-envsubst":      {"gettext-base"},
+	"helm":                  nil,
+	"iproute":               {"iproute2"},
+	"iputils":               {"iputils-arping", "iputils-clockdiff", "iputils-ping", "iputils-tracepath"},
+	"kubernetes1.36-client": {"kubectl"},
+	"man-pages":             {"manpages"},
+	"nmap-ncat":             {"ncat"},
+	"nodejs24":              {"nodejs"},
+	"nodejs24-bin":          {"nodejs"},
+	"nodejs24-npm":          {"npm"},
+	"nodejs24-npm-bin":      {"npm"},
+	"openssh-clients":       {"openssh-client"},
+	"opentofu":              nil,
+	"perf":                  {"linux-perf"},
+	"pkgconf-pkg-config":    {"pkgconf"},
+	"pnpm":                  nil,
+	"procps-ng":             {"procps"},
+	"python3-devel":         {"python3-dev"},
+	"python3-scons":         {"scons"},
+	"redhat-rpm-config":     nil,
+	"rpm-build":             {"rpm"},
+	"rpmdevtools":           nil,
+	"rust":                  {"rustc"},
+	"sqlite":                {"sqlite3"},
+	"uv":                    nil,
+	"vim-enhanced":          {"vim"},
+	"wget2-wget":            {"wget"},
+	"which":                 {"gnu-which"},
+	"xz":                    {"xz-utils"},
+}
+
+func packagesFor(distribution Distribution) ([]string, error) {
+	if !distribution.Valid() {
+		return nil, fmt.Errorf("unsupported distro %q", distribution)
+	}
+	if distribution == DistributionFedora {
+		return append([]string(nil), fedoraBaselinePackages...), nil
+	}
+	packages := make([]string, 0, len(fedoraBaselinePackages))
+	for _, pkg := range fedoraBaselinePackages {
+		if replacement, ok := debianPackageReplacements[pkg]; ok {
+			packages = append(packages, replacement...)
+			continue
+		}
+		packages = append(packages, pkg)
+	}
+	return packages, nil
+}
+
 // BaselinePackages returns a sorted copy of the packages guaranteed in every
 // VM. Callers cannot mutate the canonical manifest.
-func BaselinePackages() []string {
-	return mergePackageSets(baselinePackages)
+func BaselinePackages(distributions ...Distribution) []string {
+	distribution := DistributionFedora
+	if len(distributions) > 0 {
+		distribution = distributions[0]
+	}
+	packages, err := packagesFor(distribution)
+	if err != nil {
+		return nil
+	}
+	return mergePackageSets(packages)
 }
 
 // PackageManifest validates operator additions and merges them into the
 // guaranteed baseline. Duplicate additions, including baseline packages, are
 // harmless and the resulting manifest is always sorted and duplicate-free.
-func PackageManifest(additions []string) ([]string, error) {
+func PackageManifest(additions []string, distributions ...Distribution) ([]string, error) {
 	if err := ValidatePackages(additions); err != nil {
 		return nil, err
 	}
-	return mergePackageSets(baselinePackages, additions), nil
+	distribution := DistributionFedora
+	if len(distributions) > 0 {
+		distribution = distributions[0]
+	}
+	packages, err := packagesFor(distribution)
+	if err != nil {
+		return nil, err
+	}
+	return mergePackageSets(packages, additions), nil
 }
 
 func mergePackageSets(sets ...[]string) []string {
@@ -249,6 +339,112 @@ func mergePackageSets(sets ...[]string) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+func packageArguments(packages []string) string {
+	quoted := make([]string, 0, len(packages))
+	for _, pkg := range packages {
+		quoted = append(quoted, shellQuote(pkg))
+	}
+	return strings.Join(quoted, " ")
+}
+
+// DistributionSetupScript installs the distro-specific baseline and upstream
+// repositories. Everything after this stage is shared between guest distros.
+func DistributionSetupScript(distribution Distribution, additions []string) (string, error) {
+	packages, err := PackageManifest(additions, distribution)
+	if err != nil {
+		return "", err
+	}
+	switch distribution {
+	case DistributionFedora:
+		return fmt.Sprintf(`#!/bin/bash
+set -euo pipefail
+
+readonly ready_marker=/var/lib/agent-os/distribution-ready
+if [ -f "$ready_marker" ]; then
+  exit 0
+fi
+
+dnf install -y %s
+dnf install -y dnf-plugins-core
+dnf config-manager addrepo --from-repofile=https://rpm.releases.hashicorp.com/fedora/hashicorp.repo
+dnf install -y terraform
+dnf install -y adoptium-temurin-java-repository
+dnf config-manager setopt adoptium-temurin-java-repository.enabled=1
+dnf install -y temurin-25-jdk
+
+for executable in terraform java javac; do
+  resolved=$(command -v "$executable")
+  test -x "$resolved"
+done
+install -d -m 0755 /var/lib/agent-os
+touch "$ready_marker"
+chmod 0644 "$ready_marker"
+`, packageArguments(packages)), nil
+	case DistributionDebian:
+		aptPackages := mergePackageSets(packages, []string{"helm", "terraform", "temurin-25-jdk", "tofu"})
+		return fmt.Sprintf(`#!/bin/bash
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+readonly ready_marker=/var/lib/agent-os/distribution-ready
+if [ -f "$ready_marker" ]; then
+  exit 0
+fi
+
+apt-get update
+apt-get install -y ca-certificates curl gnupg wget
+install -d -m 0755 /etc/apt/keyrings
+installer_dir=$(mktemp -d /tmp/agent-os-debian-setup.XXXXXX)
+cleanup() {
+  rm -rf -- "$installer_dir"
+}
+trap cleanup EXIT
+
+curl -fsSL https://packages.buildkite.com/helm-linux/helm-debian/gpgkey -o "$installer_dir/helm.gpg"
+helm_fingerprint=$(gpg --show-keys --with-colons "$installer_dir/helm.gpg" | awk -F: '$1 == "fpr" {print $10; exit}')
+test "$helm_fingerprint" = DDF78C3E6EBB2D2CC223C95C62BA89D07698DBC6
+gpg --batch --yes --dearmor -o /etc/apt/keyrings/helm.gpg "$installer_dir/helm.gpg"
+echo 'deb [signed-by=/etc/apt/keyrings/helm.gpg] https://packages.buildkite.com/helm-linux/helm-debian/any/ any main' > /etc/apt/sources.list.d/helm.list
+
+curl -fsSL https://get.opentofu.org/opentofu.gpg -o /etc/apt/keyrings/opentofu.gpg
+curl -fsSL https://packages.opentofu.org/opentofu/tofu/gpgkey -o "$installer_dir/opentofu-repo.gpg"
+gpg --batch --yes --dearmor -o /etc/apt/keyrings/opentofu-repo.gpg "$installer_dir/opentofu-repo.gpg"
+echo 'deb [signed-by=/etc/apt/keyrings/opentofu.gpg,/etc/apt/keyrings/opentofu-repo.gpg] https://packages.opentofu.org/opentofu/tofu/any/ any main' > /etc/apt/sources.list.d/opentofu.list
+
+curl -fsSL https://apt.releases.hashicorp.com/gpg -o "$installer_dir/hashicorp.gpg"
+gpg --batch --yes --dearmor -o /etc/apt/keyrings/hashicorp.gpg "$installer_dir/hashicorp.gpg"
+echo 'deb [signed-by=/etc/apt/keyrings/hashicorp.gpg] https://apt.releases.hashicorp.com trixie main' > /etc/apt/sources.list.d/hashicorp.list
+
+curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public -o "$installer_dir/adoptium.gpg"
+gpg --batch --yes --dearmor -o /etc/apt/keyrings/adoptium.gpg "$installer_dir/adoptium.gpg"
+echo 'deb [signed-by=/etc/apt/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb trixie main' > /etc/apt/sources.list.d/adoptium.list
+
+chmod 0644 /etc/apt/keyrings/*.gpg /etc/apt/sources.list.d/*.list
+apt-get update
+apt-get install -y %s
+
+if [ -x /usr/bin/fdfind ] && [ ! -e /usr/local/bin/fd ]; then
+  ln -s /usr/bin/fdfind /usr/local/bin/fd
+fi
+
+curl -fsSL https://get.pnpm.io/install.sh -o "$installer_dir/install-pnpm.sh"
+PNPM_HOME=/usr/local SHELL=/bin/bash sh "$installer_dir/install-pnpm.sh"
+curl -LsSf https://astral.sh/uv/install.sh -o "$installer_dir/install-uv.sh"
+UV_UNMANAGED_INSTALL=/usr/local/bin sh "$installer_dir/install-uv.sh"
+
+for executable in helm tofu terraform pnpm uv uvx java javac; do
+  resolved=$(command -v "$executable")
+  test -x "$resolved"
+done
+install -d -m 0755 /var/lib/agent-os
+touch "$ready_marker"
+chmod 0644 "$ready_marker"
+`, packageArguments(aptPackages)), nil
+	default:
+		return "", fmt.Errorf("unsupported distro %q", distribution)
+	}
 }
 
 // CodingAgentsScript returns the root-run, idempotent installer for the seven
@@ -278,14 +474,6 @@ cd "$agent_home"
 if [ -f "$ready_marker" ]; then
   exit 0
 fi
-
-dnf install -y dnf-plugins-core
-dnf config-manager addrepo --from-repofile=https://rpm.releases.hashicorp.com/fedora/hashicorp.repo
-dnf install -y terraform
-
-dnf install -y adoptium-temurin-java-repository
-dnf config-manager setopt adoptium-temurin-java-repository.enabled=1
-dnf install -y temurin-25-jdk
 
 for executable in node npm terraform; do
   resolved=$(command -v "$executable")
@@ -680,8 +868,15 @@ func RequiredExecutables(packages []string) []string {
 	return result
 }
 
-func InstallCommand(packages []string) []string {
+func InstallCommand(packages []string, distributions ...Distribution) []string {
+	distribution := DistributionFedora
+	if len(distributions) > 0 {
+		distribution = distributions[0]
+	}
 	result := []string{"dnf", "install", "-y"}
+	if distribution == DistributionDebian {
+		result = []string{"apt-get", "install", "-y"}
+	}
 	result = append(result, packages...)
 	return result
 }

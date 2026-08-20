@@ -111,7 +111,13 @@ func (l Lima) ConfigureForwarding(ctx context.Context, spec Spec) error {
 }
 
 func (l Lima) Create(ctx context.Context, spec Spec) error {
-	definition := artifacts.FromConfig(spec.Config, spec.Architecture)
+	if spec.Distribution == "" {
+		spec.Distribution = model.DistributionFedora
+	}
+	if !spec.Distribution.Valid() {
+		return fmt.Errorf("unsupported distro %q", spec.Distribution)
+	}
+	definition := artifacts.FromConfig(spec.Config, spec.Architecture, spec.Distribution)
 	definition.VMType = l.VMType
 	definition.AgentInstructions = spec.AgentInstructions
 	profileInfo, _, profileFound, err := loadProfile(spec)
@@ -126,7 +132,12 @@ func (l Lima) Create(ctx context.Context, spec Spec) error {
 		return err
 	}
 	profile := filepath.Join(artifactDir, "lima.yaml")
-	image, err := releases.FedoraCloudBase44(spec.Architecture)
+	var image releases.Image
+	if spec.Distribution == model.DistributionDebian {
+		image, err = releases.DebianSidDaily(spec.Architecture)
+	} else {
+		image, err = releases.FedoraCloudBase44(spec.Architecture)
+	}
 	if err != nil {
 		return err
 	}

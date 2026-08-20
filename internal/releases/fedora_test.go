@@ -3,11 +3,14 @@ package releases
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/hex"
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -25,6 +28,23 @@ func TestFedoraCloudBase44Metadata(t *testing.T) {
 		}
 	}
 	if _, err := FedoraCloudBase44("arm64"); err == nil {
+		t.Fatal("expected unsupported architecture")
+	}
+}
+
+func TestDebianSidDailyMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		arch, debianArch string
+	}{{"x86_64", "amd64"}, {"aarch64", "arm64"}} {
+		image, err := DebianSidDaily(tc.arch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(image.URL, "debian-sid-genericcloud-"+tc.debianArch+"-daily.qcow2") || !strings.HasSuffix(image.ChecksumURL, "/SHA512SUMS") {
+			t.Fatalf("unexpected Debian sid image metadata: %+v", image)
+		}
+	}
+	if _, err := DebianSidDaily("riscv64"); err == nil {
 		t.Fatal("expected unsupported architecture")
 	}
 }
@@ -72,5 +92,44 @@ func TestDownloadVerifiedUsesResumableRetries(t *testing.T) {
 	}
 	if _, err := os.Stat(destination + ".part"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("partial download still exists: %v", err)
+	}
+}
+
+type debianDownloadRunner struct {
+	image []byte
+}
+
+func (r debianDownloadRunner) Run(_ context.Context, name string, args []string, _ io.Reader, _ io.Writer, _ io.Writer) error {
+	if name != "curl" {
+		return errors.New("unexpected executable")
+	}
+	var output, source string
+	for index, arg := range args {
+		if arg == "--output" && index+1 < len(args) {
+			output = args[index+1]
+		}
+	}
+	if len(args) > 0 {
+		source = args[len(args)-1]
+	}
+	if strings.HasSuffix(source, "SHA512SUMS") {
+		digest := sha512.Sum512(r.image)
+		return os.WriteFile(output, []byte(hex.EncodeToString(digest[:])+"  debian-sid-genericcloud-amd64-daily.qcow2\n"), 0o600)
+	}
+	return os.WriteFile(output, r.image, 0o600)
+}
+
+func TestDownloadVerifiedUsesDebianSHA512Manifest(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "debian.qcow2")
+	image, err := DebianSidDaily("x86_64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := DownloadVerified(context.Background(), debianDownloadRunner{image: []byte("debian-image")}, image, destination, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(destination)
+	if err != nil || string(contents) != "debian-image" {
+		t.Fatalf("downloaded contents=%q err=%v", contents, err)
 	}
 }

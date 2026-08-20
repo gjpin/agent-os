@@ -20,6 +20,7 @@ type VMDefinition struct {
 	MemoryMiB         int
 	DiskGiB           int
 	Architecture      string
+	Distribution      model.Distribution
 	VMType            string
 	AccessMode        model.AccessMode
 	OrcaPort          int
@@ -36,7 +37,11 @@ type VMDefinition struct {
 	ProfileDiskFormat bool
 }
 
-func FromConfig(c model.Config, architecture string) VMDefinition {
+func FromConfig(c model.Config, architecture string, distributions ...model.Distribution) VMDefinition {
+	distribution := model.DistributionFedora
+	if len(distributions) > 0 {
+		distribution = distributions[0]
+	}
 	packages := append([]string(nil), c.Packages...)
 	sort.Strings(packages)
 	pairingAddress := "127.0.0.1"
@@ -45,7 +50,7 @@ func FromConfig(c model.Config, architecture string) VMDefinition {
 	}
 	return VMDefinition{
 		Name: c.VMName, CPUs: c.VMCPUs, MemoryMiB: c.VMMemoryMiB,
-		DiskGiB: c.VMDiskGiB, Architecture: architecture,
+		DiskGiB: c.VMDiskGiB, Architecture: architecture, Distribution: distribution,
 		AccessMode: c.AccessMode, OrcaPort: c.OrcaPort, Packages: packages,
 		Skills: append([]string(nil), c.Skills...),
 		// The WireGuard address is on the host, not in the guest. The host
@@ -76,7 +81,10 @@ func LimaYAML(def VMDefinition) (string, error) {
 	if def.Name == "" {
 		return "", fmt.Errorf("VM name is required")
 	}
-	orcaInstallScript, err := releases.OrcaInstallScript(def.Architecture)
+	if !def.Distribution.Valid() {
+		return "", fmt.Errorf("unsupported distro %q", def.Distribution)
+	}
+	orcaInstallScript, err := releases.OrcaInstallScript(def.Distribution, def.Architecture)
 	if err != nil {
 		return "", err
 	}
@@ -84,9 +92,9 @@ func LimaYAML(def VMDefinition) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("provision repository private key: %w", err)
 	}
-	packages, err := provision.PackageManifest(def.Packages)
+	distributionSetupScript, err := provision.DistributionSetupScript(def.Distribution, def.Packages)
 	if err != nil {
-		return "", fmt.Errorf("invalid package manifest: %w", err)
+		return "", fmt.Errorf("generate distro setup: %w", err)
 	}
 	var b strings.Builder
 	if def.VMType != "qemu" && def.VMType != "vz" {
@@ -127,7 +135,9 @@ func LimaYAML(def VMDefinition) (string, error) {
 	fmt.Fprintf(&provisioning, "cat > /run/agent-os-provision-agent-instructions <<'%s'\n", agentInstructionsDelimiter)
 	appendIndented(&provisioning, agentInstructionsScript, "")
 	fmt.Fprintf(&provisioning, "%s\n/bin/bash /run/agent-os-provision-agent-instructions\n", agentInstructionsDelimiter)
-	fmt.Fprintf(&provisioning, "%s\n", strings.Join(provision.InstallCommand(packages), " "))
+	provisioning.WriteString("cat > /run/agent-os-setup-distribution <<'AGENT_OS_DISTRIBUTION_SETUP'\n")
+	appendIndented(&provisioning, distributionSetupScript, "")
+	provisioning.WriteString("AGENT_OS_DISTRIBUTION_SETUP\n/bin/bash /run/agent-os-setup-distribution\n")
 	provisioning.WriteString("cat > /run/agent-os-setup-kind-podman <<'AGENT_OS_KIND_PODMAN'\n")
 	appendIndented(&provisioning, kindPodmanScript, "")
 	provisioning.WriteString("AGENT_OS_KIND_PODMAN\n/bin/bash /run/agent-os-setup-kind-podman\n")

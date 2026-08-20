@@ -114,6 +114,59 @@ func TestCreateConfigPromptFailsOnNonTTY(t *testing.T) {
 	}
 }
 
+func TestCreateRequiresAndPersistsDistro(t *testing.T) {
+	dir := t.TempDir()
+	missing := New(bytes.NewBuffer(nil), io.Discard, io.Discard, &execx.RecordingRunner{})
+	missing.Command().SetArgs([]string{"--state-dir", dir, "create", "--dry-run"})
+	if err := missing.Command().Execute(); err == nil || !strings.Contains(err.Error(), "distro") {
+		t.Fatalf("missing distro error=%v", err)
+	}
+
+	invalid := New(bytes.NewBuffer(nil), io.Discard, io.Discard, &execx.RecordingRunner{})
+	invalid.Command().SetArgs([]string{"--state-dir", dir, "create", "--dry-run", "--distro", "other"})
+	if err := invalid.Command().Execute(); err == nil || !strings.Contains(err.Error(), "fedora or debian") {
+		t.Fatalf("invalid distro error=%v", err)
+	}
+
+	valid := New(bytes.NewBuffer(nil), io.Discard, io.Discard, &execx.RecordingRunner{})
+	valid.Command().SetArgs([]string{"--state-dir", dir, "create", "--dry-run", "--distro", "debian"})
+	if err := valid.Command().Execute(); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := state.NewStore(dir).Load(model.DefaultVMName)
+	if err != nil || loaded.Distribution != model.DistributionDebian {
+		t.Fatalf("state=%+v err=%v", loaded, err)
+	}
+
+	mismatch := New(bytes.NewBuffer(nil), io.Discard, io.Discard, &execx.RecordingRunner{})
+	mismatch.Command().SetArgs([]string{"--state-dir", dir, "create", "--dry-run", "--distro", "fedora"})
+	if err := mismatch.Command().Execute(); err == nil || !strings.Contains(err.Error(), "belongs to distro") {
+		t.Fatalf("distro mismatch error=%v", err)
+	}
+}
+
+func TestPackagesInstallUsesPersistedDistro(t *testing.T) {
+	dir := t.TempDir()
+	store := state.NewStore(dir)
+	if err := store.Save(state.State{Name: model.DefaultVMName, Provider: "lima", Distribution: model.DistributionDebian, Lifecycle: model.StatusStopped}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &execx.RecordingRunner{}
+	app := New(bytes.NewBuffer(nil), io.Discard, io.Discard, runner)
+	app.Command().SetArgs([]string{"--state-dir", dir, "packages", "install", "htop"})
+	if err := app.Command().Execute(); err != nil {
+		t.Fatal(err)
+	}
+	var commands []string
+	for _, call := range runner.Calls {
+		commands = append(commands, call.Name+" "+strings.Join(call.Args, " "))
+	}
+	joined := strings.Join(commands, "\n")
+	if !strings.Contains(joined, "sudo apt-get update") || !strings.Contains(joined, "sudo apt-get install -y") || strings.Contains(joined, " dnf ") {
+		t.Fatalf("unexpected Debian package commands:\n%s", joined)
+	}
+}
+
 func TestAuthAgentCommands(t *testing.T) {
 	tests := map[string]string{"codex": "orca account add --agent codex", "claude": "orca account add --agent claude", "opencode": "opencode auth login", "copilot": "copilot login", "pi": "pi"}
 	for agent, want := range tests {

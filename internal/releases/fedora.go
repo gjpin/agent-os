@@ -3,6 +3,7 @@ package releases
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -22,6 +23,29 @@ type Image struct {
 	URL          string
 	Filename     string
 	SHA256       string
+	SHA512       string
+	ChecksumURL  string
+}
+
+const DebianSidCloudBase = "https://cloud.debian.org/images/cloud/sid/daily/latest"
+
+func DebianSidDaily(architecture string) (Image, error) {
+	var debianArchitecture string
+	switch architecture {
+	case "x86_64":
+		debianArchitecture = "amd64"
+	case "aarch64":
+		debianArchitecture = "arm64"
+	default:
+		return Image{}, fmt.Errorf("Debian sid genericcloud is not published for architecture %q", architecture)
+	}
+	filename := fmt.Sprintf("debian-sid-genericcloud-%s-daily.qcow2", debianArchitecture)
+	return Image{
+		Architecture: architecture,
+		URL:          DebianSidCloudBase + "/" + filename,
+		Filename:     filename,
+		ChecksumURL:  DebianSidCloudBase + "/SHA512SUMS",
+	}, nil
 }
 
 func FedoraCloudBase44(architecture string) (Image, error) {
@@ -49,8 +73,9 @@ func DownloadVerified(ctx context.Context, runner execx.Runner, image Image, des
 	if runner == nil {
 		return errors.New("download runner is nil")
 	}
-	if !strings.HasPrefix(image.URL, "https://download.fedoraproject.org/") || len(image.SHA256) != sha256.Size*2 {
-		return errors.New("image metadata is not a pinned Fedora HTTPS artifact")
+	trustedURL := strings.HasPrefix(image.URL, "https://download.fedoraproject.org/") || strings.HasPrefix(image.URL, DebianSidCloudBase+"/")
+	if !trustedURL || (len(image.SHA256) != sha256.Size*2 && image.ChecksumURL == "") {
+		return errors.New("image metadata is not a trusted HTTPS artifact")
 	}
 	if destination == "" {
 		return errors.New("image destination is empty")
@@ -59,35 +84,86 @@ func DownloadVerified(ctx context.Context, runner execx.Runner, image Image, des
 		return err
 	}
 	partial := destination + ".part"
-	if err := runner.Run(ctx, "curl", []string{
-		"--fail", "--location", "--proto", "=https", "--tlsv1.2",
-		"--connect-timeout", "15", "--max-time", "1800",
-		"--retry", "10", "--retry-delay", "5", "--retry-max-time", "1800", "--retry-all-errors",
-		"--continue-at", "-", "--output", partial, image.URL,
-	}, nil, stdout, stderr); err != nil {
-		return fmt.Errorf("download Fedora image: %w", err)
-	}
-	file, err := os.Open(partial)
-	if err != nil {
-		return err
-	}
-	hash := sha256.New()
-	_, copyErr := io.Copy(hash, file)
-	closeErr := file.Close()
-	if copyErr != nil {
-		return copyErr
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	actual := hex.EncodeToString(hash.Sum(nil))
-	if !strings.EqualFold(actual, image.SHA256) {
+	for attempt := 0; attempt < 2; attempt++ {
+		expected256 := image.SHA256
+		expected512 := image.SHA512
+		if image.ChecksumURL != "" {
+			checksum, err := fetchImageChecksum(ctx, runner, image, destination+".checksums", stdout, stderr)
+			if err != nil {
+				return err
+			}
+			expected512 = checksum
+		}
+		if err := runner.Run(ctx, "curl", []string{
+			"--fail", "--location", "--proto", "=https", "--tlsv1.2",
+			"--connect-timeout", "15", "--max-time", "1800",
+			"--retry", "10", "--retry-delay", "5", "--retry-max-time", "1800", "--retry-all-errors",
+			"--continue-at", "-", "--output", partial, image.URL,
+		}, nil, stdout, stderr); err != nil {
+			return fmt.Errorf("download guest image: %w", err)
+		}
+		actual, err := imageDigest(partial, expected512 != "")
+		if err != nil {
+			return err
+		}
+		expected := expected256
+		if expected512 != "" {
+			expected = expected512
+		}
+		if strings.EqualFold(actual, expected) {
+			break
+		}
 		_ = os.Remove(partial)
-		return fmt.Errorf("Fedora image checksum mismatch: got %s", actual)
+		if attempt == 1 || image.ChecksumURL == "" {
+			return fmt.Errorf("guest image checksum mismatch: got %s", actual)
+		}
 	}
 	if err := os.Rename(partial, destination); err != nil {
 		_ = os.Remove(partial)
 		return err
 	}
 	return nil
+}
+
+func fetchImageChecksum(ctx context.Context, runner execx.Runner, image Image, path string, stdout, stderr io.Writer) (string, error) {
+	defer os.Remove(path)
+	if !strings.HasPrefix(image.ChecksumURL, DebianSidCloudBase+"/") {
+		return "", errors.New("untrusted guest image checksum URL")
+	}
+	if err := runner.Run(ctx, "curl", []string{"--fail", "--location", "--proto", "=https", "--tlsv1.2", "--retry", "10", "--output", path, image.ChecksumURL}, nil, stdout, stderr); err != nil {
+		return "", fmt.Errorf("download guest image checksums: %w", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[1] == image.Filename && len(fields[0]) == sha512.Size*2 {
+			if _, err := hex.DecodeString(fields[0]); err == nil {
+				return fields[0], nil
+			}
+		}
+	}
+	return "", fmt.Errorf("checksum manifest does not contain %q", image.Filename)
+}
+
+func imageDigest(path string, useSHA512 bool) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	if useSHA512 {
+		hash := sha512.New()
+		if _, err := io.Copy(hash, file); err != nil {
+			return "", err
+		}
+		return hex.EncodeToString(hash.Sum(nil)), nil
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }

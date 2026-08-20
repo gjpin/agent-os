@@ -56,10 +56,14 @@ The generated VM uses the native ARM64 architecture and explicitly selects
 
 ```sh
 go build -o bin/agent-os .
-bin/agent-os create agents
+bin/agent-os create --distro fedora agents
 bin/agent-os start agents
 bin/agent-os verify agents
 ```
+
+Use `--distro debian` instead to create a Debian unstable guest. The flag is
+required, and the selected distro is retained with that VM for subsequent
+package and lifecycle operations.
 
 Useful lifecycle commands:
 

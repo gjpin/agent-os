@@ -89,7 +89,7 @@ func (a *App) Command() *cobra.Command { return a.root }
 func (a *App) newRoot() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "agent-os",
-		Short:         "Manage isolated Fedora agent VMs",
+		Short:         "Manage isolated Fedora or Debian agent VMs",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
@@ -243,9 +243,10 @@ func (a *App) providerAndConfig(name string) (backend.Provider, model.Config, st
 	return p, c, a.store(c), nil
 }
 
-func (a *App) backendSpec(c model.Config, dryRun bool) backend.Spec {
+func (a *App) backendSpec(c model.Config, distribution model.Distribution, dryRun bool) backend.Spec {
 	return backend.Spec{
 		Config:            c,
+		Distribution:      distribution,
 		Architecture:      architectureForHost(),
 		AgentInstructions: a.agentInstructions,
 		DryRun:            dryRun,

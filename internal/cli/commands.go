@@ -20,11 +20,16 @@ import (
 
 func (a *App) createCommand() *cobra.Command {
 	var dryRun bool
+	var distroValue string
 	cmd := &cobra.Command{
 		Use:   "create [name]",
-		Short: "Create a Fedora agent VM",
+		Short: "Create a Fedora or Debian agent VM",
 		Args:  func(cmd *cobra.Command, args []string) error { return a.nameArgs(cmd, args) },
 		RunE: func(cmd *cobra.Command, args []string) error {
+			distribution, err := model.ParseDistribution(distroValue)
+			if err != nil {
+				return err
+			}
 			p, c, store, err := a.providerAndConfig(argName(args))
 			if err != nil {
 				return err
@@ -52,15 +57,18 @@ func (a *App) createCommand() *cobra.Command {
 				if existing, loadErr := store.Load(c.VMName); loadErr == nil && existing.Provider != p.Name() {
 					return fmt.Errorf("VM state belongs to provider %q, refusing to create it with provider %q", existing.Provider, p.Name())
 				} else if loadErr == nil {
+					if existing.Distribution != distribution {
+						return fmt.Errorf("VM state belongs to distro %q, refusing to create it with distro %q", existing.Distribution, distribution)
+					}
 					existingAutostart = existing.Autostart
 				} else if loadErr != nil && !errors.Is(loadErr, os.ErrNotExist) {
 					return fmt.Errorf("load existing VM state: %w", loadErr)
 				}
-				value := state.State{SchemaVersion: state.SchemaVersion, Name: c.VMName, Provider: p.Name(), Lifecycle: model.StatusCreating, Autostart: existingAutostart}
+				value := state.State{SchemaVersion: state.SchemaVersion, Name: c.VMName, Provider: p.Name(), Distribution: distribution, Lifecycle: model.StatusCreating, Autostart: existingAutostart}
 				if err := store.Save(value); err != nil {
 					return err
 				}
-				err := p.Create(cmd.Context(), a.backendSpec(c, dryRun))
+				err := p.Create(cmd.Context(), a.backendSpec(c, distribution, dryRun))
 				if err != nil {
 					value.Lifecycle = model.StatusFailed
 					_ = store.Save(value)
@@ -70,12 +78,14 @@ func (a *App) createCommand() *cobra.Command {
 				if err := store.Save(value); err != nil {
 					return err
 				}
-				a.emit(c, "created", fmt.Sprintf("created VM %s with %s", c.VMName, p.Name()), map[string]any{"name": c.VMName, "provider": p.Name(), "dry_run": dryRun})
+				a.emit(c, "created", fmt.Sprintf("created %s VM %s with %s", distribution, c.VMName, p.Name()), map[string]any{"name": c.VMName, "provider": p.Name(), "distribution": distribution, "dry_run": dryRun})
 				return nil
 			})
 		},
 	}
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "generate artifacts without mutating the host provider")
+	cmd.Flags().StringVar(&distroValue, "distro", "", "guest distro: fedora or debian (required)")
+	_ = cmd.MarkFlagRequired("distro")
 	return cmd
 }
 
@@ -101,7 +111,7 @@ func (a *App) lifecycleCommand(action string) *cobra.Command {
 				startedByCommand := false
 				alreadyRunning := false
 				if action == "start" {
-					if err := p.ConfigureForwarding(cmd.Context(), a.backendSpec(c, false)); err != nil {
+					if err := p.ConfigureForwarding(cmd.Context(), a.backendSpec(c, value.Distribution, false)); err != nil {
 						return err
 					}
 					providerStatus, statusErr := p.Status(cmd.Context(), c.VMName)
@@ -117,10 +127,10 @@ func (a *App) lifecycleCommand(action string) *cobra.Command {
 						opErr = p.RefreshAgentInstructions(cmd.Context(), c.VMName, a.agentInstructions)
 					}
 					if opErr == nil {
-						opErr = p.SyncProfile(cmd.Context(), a.backendSpec(c, false), true)
+						opErr = p.SyncProfile(cmd.Context(), a.backendSpec(c, value.Distribution, false), true)
 					}
 				} else {
-					if err := p.SyncProfile(cmd.Context(), a.backendSpec(c, false), false); err != nil {
+					if err := p.SyncProfile(cmd.Context(), a.backendSpec(c, value.Distribution, false), false); err != nil {
 						return fmt.Errorf("sync persistent profile before stop: %w", err)
 					}
 					opErr = p.Stop(cmd.Context(), c.VMName)
@@ -348,9 +358,13 @@ func (a *App) packagesCommand() *cobra.Command {
 		Short: "Install packages as an explicit administrative operation",
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			p, c, _, err := a.providerAndConfig("")
+			p, c, store, err := a.providerAndConfig("")
 			if err != nil {
 				return err
+			}
+			value, err := store.Load(c.VMName)
+			if err != nil {
+				return fmt.Errorf("load VM state: %w (create the VM first)", err)
 			}
 			additions := append([]string(nil), args...)
 			if len(additions) == 0 {
@@ -361,12 +375,16 @@ func (a *App) packagesCommand() *cobra.Command {
 					return fmt.Errorf("invalid package name %q", pkg)
 				}
 			}
-			packages, err := provision.PackageManifest(additions)
+			packages, err := provision.PackageManifest(additions, value.Distribution)
 			if err != nil {
 				return err
 			}
-			commandArgs := append([]string{"sudo", "dnf", "install", "-y"}, packages...)
-			return p.Exec(cmd.Context(), c.VMName, commandArgs, nil, a.Out, a.Err)
+			if value.Distribution == model.DistributionDebian {
+				if err := execAsRoot(cmd.Context(), p, c.VMName, []string{"apt-get", "update"}, nil, a.Out, a.Err); err != nil {
+					return err
+				}
+			}
+			return execAsRoot(cmd.Context(), p, c.VMName, provision.InstallCommand(packages, value.Distribution), nil, a.Out, a.Err)
 		},
 	}
 	cmd.AddCommand(install)
@@ -475,13 +493,14 @@ func (a *App) upgradeCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if _, err := store.Load(c.VMName); err != nil {
+			value, err := store.Load(c.VMName)
+			if err != nil {
 				return err
 			}
-			if err := p.SyncProfile(cmd.Context(), a.backendSpec(c, false), false); err != nil {
+			if err := p.SyncProfile(cmd.Context(), a.backendSpec(c, value.Distribution, false), false); err != nil {
 				return fmt.Errorf("sync persistent profile before upgrade: %w", err)
 			}
-			return p.Upgrade(cmd.Context(), c.VMName, a.backendSpec(c, false))
+			return p.Upgrade(cmd.Context(), c.VMName, a.backendSpec(c, value.Distribution, false))
 		},
 	}
 	cmd.Flags().BoolVar(&yes, "yes", false, "confirm the guest upgrade non-interactively")
@@ -522,7 +541,7 @@ func (a *App) destroyCommand() *cobra.Command {
 					case model.StatusStopped:
 						stopped = true
 					case model.StatusRunning:
-						if err := p.SyncProfile(cmd.Context(), a.backendSpec(c, false), false); err != nil {
+						if err := p.SyncProfile(cmd.Context(), a.backendSpec(c, value.Distribution, false), false); err != nil {
 							profileSynced = false
 							if !force {
 								return fmt.Errorf("sync persistent profile before destroy: %w", err)
@@ -577,7 +596,11 @@ func (a *App) destroyCommand() *cobra.Command {
 					if !profileSynced || !stopped || !destroyed {
 						return errors.New("refusing to purge profile: shutdown and synchronization were not confirmed")
 					}
-					if err := p.PurgeProfile(cmd.Context(), a.backendSpec(c, false)); err != nil {
+					distribution := model.DistributionFedora
+					if stateErr == nil {
+						distribution = value.Distribution
+					}
+					if err := p.PurgeProfile(cmd.Context(), a.backendSpec(c, distribution, false)); err != nil {
 						return err
 					}
 				}

@@ -2,13 +2,13 @@
 
 ## Environment
 
-* You are running in a Fedora VM.
+* You are running in an isolated agent-os Linux VM.
 * Podman is available. Use Podman instead of Docker when container tooling is necessary.
 * Always perform development inside a VS Code Dev Container.
 * If the repository does not already contain a `.devcontainer/` configuration, create one before beginning development.
 * Reuse and update an existing `.devcontainer/` configuration when one is present instead of creating an alternative development environment.
 * Configure Dev Containers with the project's required tools, runtimes, dependencies, and extensions so development, builds, and tests run inside the container.
-* Do not install project-specific development dependencies directly on the Fedora host when they can be installed in the Dev Container.
+* Do not install project-specific development dependencies directly on the agent-os guest when they can be installed in the Dev Container.
 * Use Podman as the container runtime for Dev Container-related container operations.
 
 ## Containers

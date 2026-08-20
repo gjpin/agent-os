@@ -9,6 +9,7 @@ import (
 
 type Spec struct {
 	Config            model.Config
+	Distribution      model.Distribution
 	Architecture      string
 	AgentInstructions string
 	DryRun            bool

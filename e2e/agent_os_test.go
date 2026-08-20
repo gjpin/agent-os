@@ -26,6 +26,7 @@ import (
 	"github.com/gjpin/agent-os/internal/credentials"
 	"github.com/gjpin/agent-os/internal/execx"
 	"github.com/gjpin/agent-os/internal/host"
+	"github.com/gjpin/agent-os/internal/model"
 	"github.com/gjpin/agent-os/internal/profile"
 	"github.com/gjpin/agent-os/internal/provision"
 	"golang.org/x/crypto/ssh"
@@ -80,7 +81,7 @@ func TestAgentOSE2E(t *testing.T) {
 	h.validateAndInspectConfig(t)
 
 	h.created = true
-	h.mustCLI(t, e2eCommandTimeout, "create", h.vmName)
+	h.mustCLI(t, e2eCommandTimeout, "create", "--distro", string(h.distribution), h.vmName)
 	h.assertStatus(t, "stopped")
 
 	h.vmRunning = true
@@ -152,6 +153,7 @@ type harness struct {
 	vmName               string
 	port                 int
 	providerName         string
+	distribution         model.Distribution
 	expectedInstructions string
 	env                  []string
 	runner               *isolatedRunner
@@ -201,6 +203,15 @@ func newHarness(t *testing.T, root string, info host.Info, instructions string) 
 	}
 
 	vmName := uniqueVMName(t)
+	distributionValue := os.Getenv("AGENT_OS_E2E_DISTRO")
+	if distributionValue == "" {
+		distributionValue = string(model.DistributionFedora)
+	}
+	distribution, err := model.ParseDistribution(distributionValue)
+	if err != nil {
+		removeHarnessPaths()
+		t.Fatal(err)
+	}
 	port := freeLocalPort(t)
 	keyPath := filepath.Join(tmpRoot, "repository-key")
 	writeRepositoryKey(t, keyPath)
@@ -229,6 +240,7 @@ func newHarness(t *testing.T, root string, info host.Info, instructions string) 
 		vmName:               vmName,
 		port:                 port,
 		providerName:         provider.Name(),
+		distribution:         distribution,
 		expectedInstructions: instructions,
 		env:                  env,
 		runner:               runner,
@@ -385,10 +397,10 @@ func (h *harness) waitForHostPort(t *testing.T) {
 
 func (h *harness) assertGuestHealth(t *testing.T) {
 	t.Helper()
-	if err := h.execGuestRoot(guestRootHealthScript(h.port, credentials.GuestKeyPath(h.keyPath), h.expectedInstructions)); err != nil {
+	if err := h.execGuestRoot(guestRootHealthScript(h.distribution, h.port, credentials.GuestKeyPath(h.keyPath), h.expectedInstructions)); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.execGuestAgent(guestAgentHealthScript()); err != nil {
+	if err := h.execGuestAgent(guestAgentHealthScript(h.distribution)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -771,13 +783,17 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
-func guestRootHealthScript(orcaPort int, guestKeyPath, instructions string) string {
+func guestRootHealthScript(distribution model.Distribution, orcaPort int, guestKeyPath, instructions string) string {
 	var b strings.Builder
 	b.WriteString("#!/bin/bash\nset -euo pipefail\n")
 	b.WriteString("export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n")
 	fmt.Fprintf(&b, "readonly orca_port=%s\nreadonly expected_instructions=%s\n", shellQuote(fmt.Sprint(orcaPort)), shellQuote(instructions))
-	b.WriteString("rpm -q --")
-	for _, packageName := range provision.BaselinePackages() {
+	if distribution == model.DistributionDebian {
+		b.WriteString("dpkg-query --show --")
+	} else {
+		b.WriteString("rpm -q --")
+	}
+	for _, packageName := range provision.BaselinePackages(distribution) {
 		fmt.Fprintf(&b, " %s", shellQuote(packageName))
 	}
 	b.WriteString("\n")
@@ -848,7 +864,7 @@ fi
 	return b.String()
 }
 
-func guestAgentHealthScript() string {
+func guestAgentHealthScript(distribution model.Distribution) string {
 	var b strings.Builder
 	b.WriteString(`#!/bin/bash
 set -euo pipefail
@@ -859,7 +875,7 @@ test "$PATH" = '/home/agent/.local/bin:/home/agent/.opencode/bin:/usr/local/bin:
 test "$CODEX_HOME" = /home/agent/.codex
 test "$COPILOT_HOME" = /home/agent/.copilot
 `)
-	for _, executable := range guestExecutables() {
+	for _, executable := range guestExecutables(distribution) {
 		fmt.Fprintf(&b, "resolved=$(command -v %s)\ntest -x \"$resolved\"\n", shellQuote(executable))
 	}
 	b.WriteString(`test -f "$CODEX_HOME/config.toml"
@@ -930,10 +946,10 @@ func instructionLinks() []guestRoute {
 
 func instructionsPath() string { return provision.AgentInstructionsCanonicalPath }
 
-func guestExecutables() []string {
-	executables := provision.RequiredExecutables(provision.BaselinePackages())
+func guestExecutables(distribution model.Distribution) []string {
+	executables := provision.RequiredExecutables(provision.BaselinePackages(distribution))
 	executables = append(executables, []string{
-		"node", "npm", "pnpm", "terraform", "java", "javac",
+		"node", "npm", "pnpm", "terraform", "tofu", "helm", "uv", "uvx", "java", "javac",
 		"kind", "podman", "buildah", "skopeo", "opencode", "codex",
 		"claude", "agy", "pi", "copilot", "chrome-devtools", "chrome-devtools-mcp",
 	}...)

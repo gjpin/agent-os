@@ -25,6 +25,15 @@ const (
 
 func (m AccessMode) Valid() bool { return m == AccessLocal || m == AccessWireGuard }
 
+type Distribution = provision.Distribution
+
+const (
+	DistributionFedora = provision.DistributionFedora
+	DistributionDebian = provision.DistributionDebian
+)
+
+func ParseDistribution(value string) (Distribution, error) { return provision.ParseDistribution(value) }
+
 type LogFormat string
 
 const (

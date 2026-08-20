@@ -249,12 +249,6 @@ func TestCodingAgentsScriptContainsRequiredInstallersAndSafetyControls(t *testin
 	}
 	for _, expected := range []string{
 		"set -euo pipefail",
-		"dnf install -y dnf-plugins-core",
-		"dnf config-manager addrepo --from-repofile=https://rpm.releases.hashicorp.com/fedora/hashicorp.repo",
-		"dnf install -y terraform",
-		"dnf install -y adoptium-temurin-java-repository",
-		"dnf config-manager setopt adoptium-temurin-java-repository.enabled=1",
-		"dnf install -y temurin-25-jdk",
 		"for executable in node npm terraform",
 		"https://opencode.ai/install",
 		"https://chatgpt.com/codex/install.sh",
@@ -285,27 +279,15 @@ func TestCodingAgentsScriptContainsRequiredInstallersAndSafetyControls(t *testin
 			t.Errorf("coding-agent installer omits %q", expected)
 		}
 	}
-	if strings.Index(script, "if [ -f \"$ready_marker\" ]") > strings.Index(script, "dnf install") {
-		t.Fatal("idempotency guard runs after package installation")
-	}
-	pluginInstall := strings.Index(script, "dnf install -y dnf-plugins-core")
-	hashicorpRepository := strings.Index(script, "dnf config-manager addrepo --from-repofile=https://rpm.releases.hashicorp.com/fedora/hashicorp.repo")
-	terraformInstall := strings.Index(script, "dnf install -y terraform")
-	repositoryInstall := strings.Index(script, "dnf install -y adoptium-temurin-java-repository")
-	repositoryEnable := strings.Index(script, "dnf config-manager setopt adoptium-temurin-java-repository.enabled=1")
-	jdkInstall := strings.Index(script, "dnf install -y temurin-25-jdk")
 	nodeValidation := strings.Index(script, "for executable in node npm")
 	npmInstall := strings.Index(script, "/usr/bin/npm install")
-	if !(pluginInstall < hashicorpRepository && hashicorpRepository < terraformInstall && terraformInstall < repositoryInstall && repositoryInstall < repositoryEnable && repositoryEnable < jdkInstall && jdkInstall < nodeValidation && nodeValidation < npmInstall) {
-		t.Fatalf("provisioning commands are out of order: plugin install=%d HashiCorp repository=%d Terraform install=%d repository install=%d enable=%d JDK install=%d executable validation=%d npm install=%d", pluginInstall, hashicorpRepository, terraformInstall, repositoryInstall, repositoryEnable, jdkInstall, nodeValidation, npmInstall)
+	if !(nodeValidation < npmInstall) {
+		t.Fatalf("provisioning commands are out of order: executable validation=%d npm install=%d", nodeValidation, npmInstall)
 	}
-	if strings.Contains(script, "nodejs26") || strings.Contains(script, "dnf install -y nodejs") {
+	if strings.Contains(script, "nodejs26") || strings.Contains(script, "dnf install") || strings.Contains(script, "apt-get install") {
 		t.Fatal("coding-agent bootstrap installs Node instead of using the baseline")
 	}
 	javaValidation := strings.Index(script, "for executable in java javac")
-	if javaValidation < jdkInstall {
-		t.Fatal("Java executables are validated before the JDK is installed")
-	}
 	if strings.Index(script, "touch \"$ready_marker\"") < javaValidation {
 		t.Fatal("readiness marker is written before java and javac validation")
 	}
@@ -314,6 +296,69 @@ func TestCodingAgentsScriptContainsRequiredInstallersAndSafetyControls(t *testin
 	}
 	if strings.Count(script, "readonly path_line=") != 1 {
 		t.Fatal("managed PATH line is not defined exactly once")
+	}
+}
+
+func TestDistributionSetupScriptsKeepPackageManagersSeparate(t *testing.T) {
+	fedora, err := DistributionSetupScript(DistributionFedora, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("bash", "-n")
+	command.Stdin = strings.NewReader(fedora)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Fedora setup is not valid Bash: %v\n%s", err, output)
+	}
+	for _, want := range []string{"dnf install -y", "hashicorp.com/fedora/hashicorp.repo", "adoptium-temurin-java-repository", "temurin-25-jdk"} {
+		if !strings.Contains(fedora, want) {
+			t.Errorf("Fedora setup omits %q", want)
+		}
+	}
+	if strings.Contains(fedora, "openjdk") || strings.Contains(fedora, "apt-get") {
+		t.Fatal("Fedora setup contains Debian or OpenJDK installation")
+	}
+
+	debian, err := DistributionSetupScript(DistributionDebian, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command = exec.Command("bash", "-n")
+	command.Stdin = strings.NewReader(debian)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Debian setup is not valid Bash: %v\n%s", err, output)
+	}
+	for _, want := range []string{
+		"apt.releases.hashicorp.com trixie main",
+		"packages.adoptium.net/artifactory/deb trixie main",
+		"packages.buildkite.com/helm-linux/helm-debian/any/ any main",
+		"packages.opentofu.org/opentofu/tofu/any/ any main",
+		"PNPM_HOME=/usr/local",
+		"UV_UNMANAGED_INSTALL=/usr/local/bin",
+		"temurin-25-jdk",
+	} {
+		if !strings.Contains(debian, want) {
+			t.Errorf("Debian setup omits %q", want)
+		}
+	}
+	for _, omitted := range []string{"rpmdevtools", "redhat-rpm-config", "adoptium-temurin-java-repository", "openjdk"} {
+		if strings.Contains(debian, omitted) {
+			t.Errorf("Debian setup contains Fedora-only package %q", omitted)
+		}
+	}
+}
+
+func TestDebianBaselineUsesNativePackageNames(t *testing.T) {
+	packages := BaselinePackages(DistributionDebian)
+	joined := "\n" + strings.Join(packages, "\n") + "\n"
+	for _, want := range []string{"bind9-dnsutils", "g++", "iproute2", "nodejs", "npm", "python3-dev", "rustc", "shellcheck", "vim", "xz-utils"} {
+		if !strings.Contains(joined, "\n"+want+"\n") {
+			t.Errorf("Debian baseline omits %q", want)
+		}
+	}
+	for _, omitted := range []string{"helm", "opentofu", "pnpm", "uv", "rpmdevtools", "redhat-rpm-config", "openjdk"} {
+		if strings.Contains(joined, "\n"+omitted+"\n") {
+			t.Errorf("Debian baseline contains externally installed or omitted package %q", omitted)
+		}
 	}
 }
 

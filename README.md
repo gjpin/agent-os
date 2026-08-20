@@ -2,13 +2,14 @@
 
 ## Description
 
-`agent-os` manages isolated Fedora virtual machines for coding agents. It uses
+`agent-os` manages isolated Fedora or Debian unstable virtual machines for coding agents. It uses
 [Lima](https://lima-vm.io/) everywhere: QEMU on x86_64 Linux and
 Virtualization.framework (`vz`) on Apple Silicon macOS.
 
 ## Features
 
 - Creates, starts, stops, upgrades, verifies, and destroys agent VMs.
+- Requires an explicit Fedora or Debian unstable selection when each VM is created.
 - Keeps agent credentials and configuration on a Lima-managed persistent disk.
 - Uses isolated plain-mode VMs with no host mounts, containerd, or Rosetta.
 - Provides static local or WireGuard-bound forwarding to Orca.
@@ -23,7 +24,7 @@ and macOS prerequisites.
 
 ```sh
 go build -o bin/agent-os .
-bin/agent-os create agents
+bin/agent-os create --distro fedora agents
 bin/agent-os start agents
 bin/agent-os verify agents
 bin/agent-os ssh agents
@@ -58,5 +59,6 @@ go test -tags=e2e ./e2e -run '^$'
 Run the real-VM suite on a supported, configured host:
 
 ```sh
-make e2e
+make e2e                          # Fedora guest
+AGENT_OS_E2E_DISTRO=debian make e2e
 ```
