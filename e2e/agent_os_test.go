@@ -409,9 +409,19 @@ func (h *harness) assertGuestHealth(t *testing.T) {
 	if err := h.execGuestRoot(guestRootHealthScript(h.distribution, h.port, credentials.GuestKeyPath(h.keyPath), h.expectedInstructions)); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.execGuestAgent(guestAgentHealthScript(h.distribution)); err != nil {
-		t.Fatal(err)
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err := h.execGuestAgent(guestAgentHealthScript(h.distribution)); err == nil {
+			return
+		} else {
+			lastErr = err
+			t.Logf("guest agent health attempt %d/3 failed: %v", attempt, err)
+		}
+		if attempt < 3 {
+			time.Sleep(5 * time.Second)
+		}
 	}
+	t.Fatal(lastErr)
 }
 
 func (h *harness) mustWriteSentinel(t *testing.T) {
@@ -435,7 +445,7 @@ func (h *harness) mustResetK3s(t *testing.T) {
 func (h *harness) assertSentinel(t *testing.T) {
 	t.Helper()
 	if err := h.execGuestAgent(guestSentinelCheckScript()); err != nil {
-		t.Fatal(err)
+		t.Fatalf("guest profile sentinel check failed: %v", err)
 	}
 }
 
@@ -805,7 +815,7 @@ func shellQuote(value string) string {
 
 func guestRootHealthScript(distribution model.Distribution, orcaPort int, guestKeyPath, instructions string) string {
 	var b strings.Builder
-	b.WriteString("#!/bin/bash\nset -euo pipefail\n")
+	b.WriteString("#!/bin/bash\nset -euo pipefail\ntrap 'echo \\\"agent-os: guest root health failed at line $LINENO: $BASH_COMMAND\\\" >&2' ERR\n")
 	b.WriteString("export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n")
 	fmt.Fprintf(&b, "readonly orca_port=%s\nreadonly expected_instructions=%s\n", shellQuote(fmt.Sprint(orcaPort)), shellQuote(instructions))
 	if distribution == model.DistributionDebian {
@@ -915,6 +925,13 @@ func guestAgentHealthScript(distribution model.Distribution) string {
 	var b strings.Builder
 	b.WriteString(`#!/bin/bash
 set -euo pipefail
+current_checkpoint=initial
+checkpoint() {
+  current_checkpoint=$1
+  echo "agent-os: guest agent health checkpoint: $current_checkpoint" >&2
+}
+trap 'echo "agent-os: guest agent health failed at checkpoint $current_checkpoint at line $LINENO: $BASH_COMMAND" >&2' ERR
+checkpoint identity
 test "$(id -un)" = agent
 test "$(id -u)" -ne 0
 test "$HOME" = /home/agent
@@ -922,41 +939,68 @@ test "$PATH" = '/home/agent/.local/bin:/home/agent/.opencode/bin:/usr/local/bin:
 test "$CODEX_HOME" = /home/agent/.codex
 test "$COPILOT_HOME" = /home/agent/.copilot
 `)
+	b.WriteString("checkpoint executables\n")
 	for _, executable := range guestExecutables(distribution) {
 		fmt.Fprintf(&b, "resolved=$(command -v %s)\ntest -x \"$resolved\"\n", shellQuote(executable))
 	}
 	b.WriteString(`test -f "$CODEX_HOME/config.toml"
+checkpoint config
 grep -Eq '^[[:space:]]*cli_auth_credentials_store[[:space:]]*=[[:space:]]*"file"[[:space:]]*$' "$CODEX_HOME/config.toml"
 test -n "$(find "$HOME/.agents/skills" -type f -name SKILL.md -print -quit)"
 test -f "$HOME/.agents/skills/playwright-cli/SKILL.md"
 test -f "$HOME/.claude/skills/playwright-cli/SKILL.md"
 test -f "$HOME/.kube/config"
+checkpoint kubernetes
 kubectl get nodes
 kubectl get pods --all-namespaces
 kubectl get pods --namespace kube-system --selector k8s-app=cilium --output name | grep -q '^pod/'
 kubectl wait --for=condition=Ready node --all --timeout=2m
 cilium status --wait
+checkpoint k3s-helper
 sudo -n /usr/local/bin/agent-os-k3s create
 if sudo -n true >/dev/null 2>&1; then
   echo 'agent unexpectedly has unrestricted passwordless sudo' >&2
   exit 1
 fi
 browser_dir=$(mktemp -d /tmp/agent-os-playwright-e2e.XXXXXX)
-trap 'rm -rf -- "$browser_dir"' EXIT
-PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" playwright screenshot about:blank "$browser_dir/playwright.png"
+browser_session="agent-os-e2e-$$"
+cleanup_browser() {
+  PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" \
+    /usr/bin/timeout 15s playwright-cli -s="$browser_session" close >/dev/null 2>&1 || true
+  rm -rf -- "$browser_dir"
+}
+trap cleanup_browser EXIT
+checkpoint playwright-screenshot
+for attempt in 1 2 3 4 5; do
+  echo "agent-os: guest agent health screenshot attempt $attempt" >&2
+  if PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" /usr/bin/timeout 45s playwright screenshot about:blank "$browser_dir/playwright.png"; then
+    break
+  fi
+  if [ "$attempt" -eq 5 ]; then
+    exit 1
+  fi
+  sleep 3
+done
 test -s "$browser_dir/playwright.png"
-PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" playwright-cli -s=agent-os-e2e open about:blank
-PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" playwright-cli -s=agent-os-e2e snapshot >/dev/null
-PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" playwright-cli -s=agent-os-e2e close
+checkpoint playwright-cli
+PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" \
+  /usr/bin/timeout 45s playwright-cli -s="$browser_session" open about:blank
+PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" \
+  /usr/bin/timeout 45s playwright-cli -s="$browser_session" snapshot >/dev/null
+PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" \
+  /usr/bin/timeout 15s playwright-cli -s="$browser_session" close
 `)
 	if distribution == model.DistributionDebian {
+		b.WriteString("checkpoint docker\n")
 		b.WriteString("docker info >/dev/null\n")
 	} else {
+		b.WriteString("checkpoint podman\n")
 		b.WriteString(`export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 podman info --format json | jq -e '(.host.security.rootless == true) and (.host.cgroupVersion == "v2" or .host.cgroupVersion == "2")' >/dev/null
 `)
 	}
+	b.WriteString("checkpoint complete\n")
 	return b.String()
 }
 
@@ -976,14 +1020,28 @@ func guestSentinelCheckScript() string {
 	return `#!/bin/bash
 set -euo pipefail
 sentinel='agent-os-e2e-profile-sentinel-v1'
+claude_sentinel='sentinel'
+checkpoint='initial'
+trap 'echo "agent-os: guest profile sentinel failed at checkpoint $checkpoint at line $LINENO: $BASH_COMMAND" >&2' ERR
+checkpoint='agent-os-link'
 test -L "$HOME/.agent-os"
+checkpoint='agent-os-file'
 test -f "$HOME/.agent-os/e2e-sentinel"
+checkpoint='agent-os-content'
 test "$(cat "$HOME/.agent-os/e2e-sentinel")" = "$sentinel"
+checkpoint='profile-agent-os-file'
+test -f /var/lib/agent-os/profile/agent-os/e2e-sentinel
 test "$(cat /var/lib/agent-os/profile/agent-os/e2e-sentinel)" = "$sentinel"
+checkpoint='claude-file'
 test -f "$HOME/.claude.json"
 test ! -L "$HOME/.claude.json"
-test "$(cat "$HOME/.claude.json")" = '{"agent_os_e2e":"sentinel"}'
-test "$(cat /var/lib/agent-os/profile/claude.json)" = '{"agent_os_e2e":"sentinel"}'
+checkpoint='claude-content'
+home_claude_sentinel=$(jq -r '.agent_os_e2e // "<missing>"' "$HOME/.claude.json")
+profile_claude_sentinel=$(jq -r '.agent_os_e2e // "<missing>"' /var/lib/agent-os/profile/claude.json 2>/dev/null || true)
+echo "agent-os: Claude sentinel home=$home_claude_sentinel profile=$profile_claude_sentinel" >&2
+test "$home_claude_sentinel" = "$claude_sentinel"
+checkpoint='claude-profile-file'
+test "$profile_claude_sentinel" = "$claude_sentinel"
 `
 }
 

@@ -22,7 +22,7 @@ func TestOrcaInstallScriptSelectsDebianPackage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"orca-ide_1.4.176_arm64.deb", "apt-get install -y", "10f5974c42076e50"} {
+	for _, want := range []string{"orca-ide_1.4.176_arm64.deb", "apt-get install -y --allow-downgrades", "10f5974c42076e50"} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("Debian Orca install script omits %q: %s", want, script)
 		}
@@ -42,7 +42,7 @@ func TestOrcaLatestInstallScriptVerifiesPublishedDigest(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, want := range []string{"releases/latest", tc.assetPart, `startswith("sha256:")`, `test "$actual" = "$expected"`} {
+		for _, want := range []string{"releases/latest", tc.assetPart, `startswith("sha256:")`, `test "$actual" = "$expected"`, "resources/bin/orca-ide", "ln -sfn"} {
 			if !strings.Contains(script, want) {
 				t.Errorf("latest Orca installer omits %q", want)
 			}

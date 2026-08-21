@@ -19,6 +19,7 @@ const (
 	CodingAgentsReadyPath          = "/var/lib/agent-os/coding-agents-ready"
 	ProvisioningReadyPath          = "/var/lib/agent-os/provision-ready"
 	OrcaSkillsReadyPath            = "/var/lib/agent-os/orca-skills-ready"
+	OrcaReadinessPath              = "/usr/local/libexec/agent-os-wait-for-orca"
 	AgentHome                      = "/home/agent"
 	AgentManagedPath               = "/home/agent/.local/bin:/home/agent/.opencode/bin:/usr/local/bin:/usr/bin:/bin"
 	ProfileMountPath               = "/var/lib/agent-os/profile"
@@ -161,6 +162,8 @@ readonly agent_home=/home/agent
 readonly ready_marker=/var/lib/agent-os/orca-skills-ready
 readonly managed_path=/home/agent/.local/bin:/home/agent/.opencode/bin:/usr/local/bin:/usr/bin:/bin
 
+cd "$agent_home"
+
 if [ -f "$ready_marker" ]; then
   exit 0
 fi
@@ -173,11 +176,20 @@ run_as_agent() {
     CODEX_HOME="$agent_home/.codex" COPILOT_HOME="$agent_home/.copilot" "$@"
 }
 
-run_as_agent /usr/bin/orca skills install \
-  --skill orca-cli \
-  --skill orchestration \
-  --agent universal
-run_as_agent /usr/bin/orca skills update --all
+for attempt in 1 2 3; do
+  if run_as_agent /usr/bin/orca skills install \
+    --skill orca-cli \
+    --skill orchestration \
+    --agent universal && \
+    run_as_agent /usr/bin/orca skills update --all; then
+    break
+  fi
+  if [ "$attempt" -eq 3 ]; then
+    echo 'agent-os: Orca skills installation failed after 3 attempts' >&2
+    exit 1
+  fi
+  sleep $((attempt * 5))
+done
 
 install -d -o root -g root -m 0755 /var/lib/agent-os
 touch "$ready_marker"
@@ -419,15 +431,39 @@ if [ -f "$ready_marker" ]; then
   exit 0
 fi
 
-dnf install -y %s
-dnf install -y dnf-plugins-core
+dnf_install() {
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    if dnf install -y "$@"; then
+      return 0
+    fi
+    if [ "$attempt" -eq 5 ]; then
+      echo "agent-os: failed to install packages after 5 attempts: $*" >&2
+      return 1
+    fi
+    dnf clean metadata || true
+    sleep $((attempt * 5))
+  done
+}
+
+dnf_install %s
+dnf_install dnf-plugins-core
 if [ ! -f /etc/yum.repos.d/hashicorp.repo ]; then
-  dnf config-manager addrepo --from-repofile=https://rpm.releases.hashicorp.com/fedora/hashicorp.repo
+  for attempt in 1 2 3 4 5; do
+    if dnf config-manager addrepo --from-repofile=https://rpm.releases.hashicorp.com/fedora/hashicorp.repo; then
+      break
+    fi
+    if [ "$attempt" -eq 5 ]; then
+      echo 'agent-os: failed to add the HashiCorp repository after 5 attempts' >&2
+      exit 1
+    fi
+    sleep $((attempt * 5))
+  done
 fi
-dnf install -y terraform
-dnf install -y adoptium-temurin-java-repository
+dnf_install terraform
+dnf_install adoptium-temurin-java-repository
 dnf config-manager setopt adoptium-temurin-java-repository.enabled=1
-dnf install -y temurin-25-jdk
+dnf_install temurin-25-jdk
 
 for executable in terraform java javac; do
   resolved=$(command -v "$executable")
@@ -442,6 +478,7 @@ chmod 0644 "$ready_marker"
 		return fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 readonly ready_marker=/var/lib/agent-os/distribution-ready
 if [ -f "$ready_marker" ]; then
@@ -506,11 +543,26 @@ fi
 curl -fsSL https://get.pnpm.io/install.sh -o "$installer_dir/install-pnpm.sh"
 PNPM_HOME=/usr/local SHELL=/bin/bash sh "$installer_dir/install-pnpm.sh"
 curl -LsSf https://astral.sh/uv/install.sh -o "$installer_dir/install-uv.sh"
-UV_UNMANAGED_INSTALL=/usr/local/bin sh "$installer_dir/install-uv.sh"
+for attempt in 1 2 3 4 5; do
+  # The upstream installer can finish the file moves and still return non-zero
+  # while checking the resulting PATH. Treat the installed binaries as the
+  # source of truth so reconciliation remains idempotent.
+  UV_UNMANAGED_INSTALL=/usr/local/bin sh "$installer_dir/install-uv.sh" || true
+  if [ -x /usr/local/bin/uv ] && [ -x /usr/local/bin/uvx ]; then
+    break
+  fi
+  if [ "$attempt" -eq 5 ]; then
+    echo 'agent-os: uv installer did not produce executable uv and uvx binaries' >&2
+    exit 1
+  fi
+  sleep $((attempt * 5))
+done
 
 for executable in helm tofu terraform pnpm uv uvx java javac; do
-  resolved=$(command -v "$executable")
-  test -x "$resolved"
+  if ! resolved=$(command -v "$executable") || ! test -x "$resolved"; then
+    echo "agent-os: required executable is unavailable: $executable (PATH=$PATH)" >&2
+    exit 1
+  fi
 done
 install -d -m 0755 /var/lib/agent-os
 touch "$ready_marker"
@@ -629,7 +681,39 @@ download_installer https://cursor.com/install "$installer_dir/cursor.sh"
 run_as_agent /bin/bash "$installer_dir/cursor.sh"
 
 download_installer https://opencode.ai/install "$installer_dir/opencode.sh"
-run_as_agent /bin/bash "$installer_dir/opencode.sh" --no-modify-path
+resolve_opencode_version() {
+  local attempt version
+  for attempt in 1 2 3 4 5; do
+    if version=$(curl --fail --silent --show-error --location \
+      --connect-timeout 15 --max-time 300 \
+      --retry 10 --retry-delay 5 --retry-max-time 300 --retry-all-errors \
+      --output /dev/null --write-out '%{url_effective}\n' \
+      https://github.com/anomalyco/opencode/releases/latest | \
+      sed -n 's#.*/releases/tag/v##p'); then
+      if [ -n "$version" ]; then
+        printf '%s\n' "$version"
+        return 0
+      fi
+    fi
+    if [ "$attempt" -lt 5 ]; then
+      sleep $((attempt * 5))
+    fi
+  done
+  echo 'agent-os: failed to resolve the latest OpenCode version' >&2
+  return 1
+}
+opencode_version=$(resolve_opencode_version)
+for attempt in 1 2 3 4 5; do
+  if run_as_agent /bin/bash "$installer_dir/opencode.sh" \
+    --version "$opencode_version" --no-modify-path; then
+    break
+  fi
+  if [ "$attempt" -eq 5 ]; then
+    echo 'agent-os: OpenCode installer failed after 5 attempts' >&2
+    exit 1
+  fi
+  sleep $((attempt * 5))
+done
 
 download_installer https://chatgpt.com/codex/install.sh "$installer_dir/codex.sh"
 run_as_agent /usr/bin/env CODEX_INSTALL_DIR="$agent_home/.local/bin" \
@@ -825,7 +909,16 @@ install_k3s() {
       installer="$installer_dir/install-k3s.sh"
       readonly installer
       download_k3s_installer "$installer"
-      INSTALL_K3S_CHANNEL=stable "$installer"
+      for attempt in 1 2 3 4 5; do
+        if INSTALL_K3S_CHANNEL=stable "$installer"; then
+          break
+        fi
+        if [ "$attempt" -eq 5 ]; then
+          echo 'agent-os: k3s installer failed after 5 attempts' >&2
+          exit 1
+        fi
+        sleep $((attempt * 5))
+      done
     )
   else
     systemctl enable --now k3s.service
@@ -861,6 +954,8 @@ publish_kubeconfig() {
 install_cilium_cli() {
   local cli_version cli_arch archive
   cli_version=$(curl --fail --silent --show-error --location \
+    --connect-timeout 15 --max-time 300 \
+    --retry 10 --retry-delay 5 --retry-max-time 300 --retry-all-errors \
     https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
   case "$(uname -m)" in
     x86_64) cli_arch=amd64 ;;
@@ -872,10 +967,14 @@ install_cilium_cli() {
     installer_dir=$(mktemp -d /tmp/agent-os-cilium-cli.XXXXXX)
     readonly installer_dir
     trap 'rm -rf -- "$installer_dir"' EXIT
-    curl --fail --silent --show-error --location --retry 5 \
+    curl --fail --silent --show-error --location \
+      --connect-timeout 15 --max-time 300 \
+      --retry 10 --retry-delay 5 --retry-max-time 300 --retry-all-errors \
       --output "$installer_dir/$archive" \
       "https://github.com/cilium/cilium-cli/releases/download/${cli_version}/${archive}"
-    curl --fail --silent --show-error --location --retry 5 \
+    curl --fail --silent --show-error --location \
+      --connect-timeout 15 --max-time 300 \
+      --retry 10 --retry-delay 5 --retry-max-time 300 --retry-all-errors \
       --output "$installer_dir/$archive.sha256sum" \
       "https://github.com/cilium/cilium-cli/releases/download/${cli_version}/${archive}.sha256sum"
     (cd "$installer_dir" && sha256sum --check "$archive.sha256sum")

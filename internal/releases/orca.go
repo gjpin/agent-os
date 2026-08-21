@@ -70,7 +70,7 @@ func OrcaInstallScript(distribution provision.Distribution, architecture string)
 		installCommand = `/usr/bin/dnf install -y "$tmp"`
 	case provision.DistributionDebian:
 		packageInfo, err = OrcaDEB(architecture)
-		installCommand = `DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get install -y "$tmp"`
+		installCommand = `DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get install -y --allow-downgrades "$tmp"`
 	default:
 		return "", fmt.Errorf("unsupported distro %q", distribution)
 	}
@@ -90,12 +90,12 @@ if [ "$actual" != "$expected" ]; then
   exit 1
 fi
 %s
-/usr/bin/test -x /usr/bin/orca-ide
+%s
 if [ ! -e /usr/bin/orca ] && [ ! -L /usr/bin/orca ]; then
   /usr/bin/ln -s /usr/bin/orca-ide /usr/bin/orca
 fi
 /usr/bin/test -x /usr/bin/orca
-`, packageInfo.Extension, packageInfo.URL, packageInfo.SHA256, installCommand), nil
+`, packageInfo.Extension, packageInfo.URL, packageInfo.SHA256, installCommand, orcaCLILinkScript()), nil
 }
 
 // OrcaLatestInstallScript installs the latest stable GitHub release and
@@ -113,7 +113,7 @@ func OrcaLatestInstallScript(distribution provision.Distribution, architecture s
 		}
 	case provision.DistributionDebian:
 		extension = "deb"
-		installCommand = `DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get install -y "$package_path"`
+		installCommand = `DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get install -y --allow-downgrades "$package_path"`
 		if architecture == "x86_64" {
 			assetPattern = `^orca-ide_[0-9.]+_amd64\.deb$`
 		} else if architecture == "aarch64" {
@@ -146,12 +146,23 @@ expected=$(printf '%%s' "$asset" | /usr/bin/jq -er '.digest | select(startswith(
 actual=$(/usr/bin/sha256sum "$package_path" | /usr/bin/awk '{print $1}')
 test "$actual" = "$expected"
 %s
-/usr/bin/test -x /usr/bin/orca-ide
+%s
 if [ ! -e /usr/bin/orca ] && [ ! -L /usr/bin/orca ]; then
   /usr/bin/ln -s /usr/bin/orca-ide /usr/bin/orca
 fi
 /usr/bin/test -x /usr/bin/orca
-`, extension, shellQuoteForScript(assetPattern), installCommand), nil
+`, extension, shellQuoteForScript(assetPattern), installCommand, orcaCLILinkScript()), nil
+}
+
+func orcaCLILinkScript() string {
+	return `for dir in /opt/Orca /opt/orca-ide /opt/orca; do
+  shim="$dir/resources/bin/orca-ide"
+  if [ -x "$shim" ]; then
+    /usr/bin/ln -sfn "$shim" /usr/bin/orca-ide
+    break
+  fi
+done
+/usr/bin/test -x /usr/bin/orca-ide`
 }
 
 func shellQuoteForScript(value string) string {

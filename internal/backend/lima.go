@@ -192,12 +192,24 @@ func (l Lima) Start(ctx context.Context, name string) error {
 func limaProvisioningWaitScript() string {
 	return `#!/bin/bash
 set -euo pipefail
-while ! test -f ` + provision.ProvisioningReadyPath + `; do
-  if systemctl is-failed --quiet agent-os-provision.service; then
-    systemctl status --no-pager agent-os-provision.service >&2 || true
-    exit 1
-  fi
-  sleep 2
+while :; do
+	if ! active_state=$(systemctl show --property=ActiveState --value agent-os-provision.service); then
+		sleep 2
+		continue
+	fi
+	if ! sub_state=$(systemctl show --property=SubState --value agent-os-provision.service); then
+		sleep 2
+		continue
+	fi
+	if systemctl is-failed --quiet agent-os-provision.service; then
+		systemctl status --no-pager agent-os-provision.service >&2 || true
+		exit 1
+	fi
+	if test -f ` + provision.ProvisioningReadyPath + ` &&
+		[ "$active_state" = active ] && [ "$sub_state" = exited ]; then
+		exit 0
+	fi
+	sleep 2
 done
 `
 }
@@ -324,7 +336,14 @@ func (l Lima) Upgrade(ctx context.Context, name string, spec Spec) error {
 			return fmt.Errorf("%s: %w", step.name, err)
 		}
 	}
-	return l.ExecAsRoot(ctx, name, []string{"systemctl", "restart", "orca.service"}, nil, l.Out, l.Err)
+	if err := l.ExecAsRoot(ctx, name, []string{"systemctl", "restart", "orca.service"}, nil, l.Out, l.Err); err != nil {
+		return err
+	}
+	readinessScript := fmt.Sprintf("if [ -x %s ]; then\n  %s\nfi\n", provision.OrcaReadinessPath, provision.OrcaReadinessPath)
+	if err := l.ExecAsRoot(ctx, name, []string{"/bin/bash", "-s"}, strings.NewReader(readinessScript), l.Out, l.Err); err != nil {
+		return fmt.Errorf("wait for Orca readiness: %w", err)
+	}
+	return nil
 }
 
 func (l Lima) Exec(ctx context.Context, name string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -346,6 +365,7 @@ func (l Lima) ExecAsUser(ctx context.Context, name, user string, args []string, 
 		"PATH=" + provision.AgentManagedPath,
 		"CODEX_HOME=" + provision.AgentHome + "/.codex",
 		"COPILOT_HOME=" + provision.AgentHome + "/.copilot",
+		"KUBECONFIG=" + provision.K3sAgentKubeconfigPath,
 	}
 	commandArgs = append(commandArgs, args...)
 	return command(l.Runner, ctx, "limactl", commandArgs, stdin, stdout, stderr)

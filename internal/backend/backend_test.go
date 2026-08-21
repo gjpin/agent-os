@@ -12,6 +12,7 @@ import (
 	"github.com/gjpin/agent-os/internal/execx"
 	"github.com/gjpin/agent-os/internal/model"
 	"github.com/gjpin/agent-os/internal/profile"
+	"github.com/gjpin/agent-os/internal/provision"
 	"github.com/gjpin/agent-os/internal/releases"
 )
 
@@ -67,6 +68,7 @@ func TestLimaUpgradeReconcilesGuestThenRestartsOrca(t *testing.T) {
 		"limactl shell agents -- sudo /bin/rm -f /var/lib/agent-os/coding-agents-ready",
 		"limactl shell agents -- sudo /bin/bash -s",
 		"limactl shell agents -- sudo systemctl restart orca.service",
+		"limactl shell agents -- sudo /bin/bash -s",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("upgrade calls omit %q:\n%s", want, got)
@@ -182,6 +184,10 @@ func TestLimaGuestOperationsUseLimactlShell(t *testing.T) {
 		if call.name != "limactl" || len(call.args) == 0 || call.args[0] != "shell" {
 			t.Fatalf("unexpected guest call: %+v", call)
 		}
+	}
+	userCall := strings.Join(r.calls[len(r.calls)-1].args, " ")
+	if !strings.Contains(userCall, "KUBECONFIG="+provision.K3sAgentKubeconfigPath) {
+		t.Fatalf("agent guest call does not select the agent kubeconfig: %s", userCall)
 	}
 	if err := lima.ExecAsUser(ctx, "agents", "root", []string{"true"}, nil, io.Discard, io.Discard); err == nil {
 		t.Fatal("unsupported guest user accepted")

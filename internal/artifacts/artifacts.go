@@ -158,9 +158,6 @@ func LimaYAML(def VMDefinition) (string, error) {
 	provisioning.WriteString("cat > /run/agent-os-install-coding-agents <<'AGENT_OS_CODING_AGENTS'\n")
 	appendIndented(&provisioning, codingAgentsScript, "")
 	provisioning.WriteString("AGENT_OS_CODING_AGENTS\n/bin/bash /run/agent-os-install-coding-agents\n")
-	if def.ProfileDiskID != "" {
-		provisioning.WriteString("/usr/local/libexec/agent-os-profile-sync sync\n")
-	}
 	provisioning.WriteString("cat > /run/agent-os-install-orca <<'AGENT_OS_ORCA_INSTALL'\n")
 	appendIndented(&provisioning, orcaInstallScript, "")
 	provisioning.WriteString("AGENT_OS_ORCA_INSTALL\n/bin/bash /run/agent-os-install-orca\n")
@@ -192,6 +189,9 @@ func LimaYAML(def VMDefinition) (string, error) {
 		provisioning.WriteString("cat > /usr/local/libexec/agent-os-wait-for-orca <<'AGENT_OS_WAIT_FOR_ORCA'\n")
 		appendIndented(&provisioning, orcaReadinessScript(def.OrcaPort), "")
 		provisioning.WriteString("AGENT_OS_WAIT_FOR_ORCA\nchmod 0700 /usr/local/libexec/agent-os-wait-for-orca\n/bin/bash /usr/local/libexec/agent-os-wait-for-orca\n")
+	}
+	if def.ProfileDiskID != "" {
+		provisioning.WriteString("if [ -f /var/lib/agent-os/profile/claude.json ]; then\n  /usr/local/libexec/agent-os-profile-sync restore\nelse\n  /usr/local/libexec/agent-os-profile-sync sync\nfi\n")
 	}
 	fmt.Fprintf(&provisioning, "install -d -m 0755 /var/lib/agent-os\ntouch %s\nchmod 0644 %s\n", provision.ProvisioningReadyPath, provision.ProvisioningReadyPath)
 
@@ -422,8 +422,10 @@ func firewallRules(allowedCIDRs []string, orcaPort []int) ([]string, error) {
 		"add table inet agent_os",
 		"add chain inet agent_os forward { type filter hook forward priority 0; policy drop; }",
 		"add rule inet agent_os forward ct state established,related accept",
+		"add rule inet agent_os forward iifname { \"cilium_host\", \"cilium_net\", \"cilium_vxlan\" } ip daddr 10.0.0.0/8 accept",
 		"add rule inet agent_os forward iifname { \"cilium_host\", \"cilium_net\", \"cilium_vxlan\" } ip daddr { 10.42.0.0/16, 10.43.0.0/16 } accept",
 		"add rule inet agent_os forward iifname \"lxc*\" ip daddr { 10.42.0.0/16, 10.43.0.0/16 } accept",
+		"add rule inet agent_os forward oifname { \"cilium_host\", \"cilium_net\", \"cilium_vxlan\" } ip saddr 10.0.0.0/8 accept",
 		"add rule inet agent_os forward oifname { \"cilium_host\", \"cilium_net\", \"cilium_vxlan\" } ip saddr { 10.42.0.0/16, 10.43.0.0/16 } accept",
 		"add rule inet agent_os forward oifname \"lxc*\" ip saddr { 10.42.0.0/16, 10.43.0.0/16 } accept",
 		"add rule inet agent_os forward iifname { \"cilium_host\", \"cilium_net\", \"cilium_vxlan\" } udp dport { 53, 67, 68, 123 } accept",
@@ -436,6 +438,7 @@ func firewallRules(allowedCIDRs []string, orcaPort []int) ([]string, error) {
 		"add rule inet agent_os forward iifname \"lxc*\" ip6 daddr != { ::1/128, fc00::/7, fe80::/10 } accept",
 		"add chain inet agent_os output { type filter hook output priority 0; policy drop; }",
 		"add rule inet agent_os output ct state established,related accept",
+		"add rule inet agent_os output oifname { \"cilium_host\", \"cilium_net\", \"cilium_vxlan\" } ip daddr 10.0.0.0/8 accept",
 		"add rule inet agent_os output oifname { \"cilium_host\", \"cilium_net\", \"cilium_vxlan\" } ip daddr { 10.42.0.0/16, 10.43.0.0/16 } accept",
 		"add rule inet agent_os output oifname \"lxc*\" ip daddr { 10.42.0.0/16, 10.43.0.0/16 } accept",
 		"add rule inet agent_os output oifname != \"lo\" udp dport { 53, 67, 68, 123 } accept",
@@ -446,6 +449,7 @@ func firewallRules(allowedCIDRs []string, orcaPort []int) ([]string, error) {
 		"add rule inet agent_os output oifname \"lo\" accept",
 		"add chain inet agent_os input { type filter hook input priority 0; policy drop; }",
 		"add rule inet agent_os input ct state established,related accept",
+		"add rule inet agent_os input iifname { \"cilium_host\", \"cilium_net\", \"cilium_vxlan\" } ip saddr 10.0.0.0/8 accept",
 		"add rule inet agent_os input iifname { \"cilium_host\", \"cilium_net\", \"cilium_vxlan\" } ip saddr { 10.42.0.0/16, 10.43.0.0/16 } accept",
 		"add rule inet agent_os input iifname \"lxc*\" ip saddr { 10.42.0.0/16, 10.43.0.0/16 } accept",
 		"add rule inet agent_os input iifname \"lo\" accept",

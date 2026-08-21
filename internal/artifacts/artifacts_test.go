@@ -70,6 +70,8 @@ func TestFirewallAllowsCiliumClusterTrafficWithoutOpeningPrivateEgress(t *testin
 	for _, want := range []string{
 		`iifname { "cilium_host", "cilium_net", "cilium_vxlan" }`,
 		`iifname "lxc*"`,
+		`ip daddr 10.0.0.0/8 accept`,
+		`ip saddr 10.0.0.0/8 accept`,
 		`ip daddr { 10.42.0.0/16, 10.43.0.0/16 } accept`,
 		`ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } accept`,
 	} {

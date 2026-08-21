@@ -315,7 +315,7 @@ func TestDistributionSetupScriptsKeepPackageManagersSeparate(t *testing.T) {
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("Fedora setup is not valid Bash: %v\n%s", err, output)
 	}
-	for _, want := range []string{"dnf install -y", "hashicorp.com/fedora/hashicorp.repo", "adoptium-temurin-java-repository", "temurin-25-jdk"} {
+	for _, want := range []string{"dnf install -y", "hashicorp.com/fedora/hashicorp.repo", "for attempt in 1 2 3 4 5", "adoptium-temurin-java-repository", "temurin-25-jdk"} {
 		if !strings.Contains(fedora, want) {
 			t.Errorf("Fedora setup omits %q", want)
 		}
@@ -340,6 +340,7 @@ func TestDistributionSetupScriptsKeepPackageManagersSeparate(t *testing.T) {
 		"packages.opentofu.org/opentofu/tofu/any/ any main",
 		"PNPM_HOME=/usr/local",
 		"UV_UNMANAGED_INSTALL=/usr/local/bin",
+		"uv installer did not produce executable uv and uvx binaries",
 		"temurin-25-jdk",
 		"download.docker.com/linux/debian",
 		"docker-ce",
@@ -410,7 +411,9 @@ func TestOrcaSkillsScriptInstallsSharedSkillsIdempotently(t *testing.T) {
 		"set -euo pipefail",
 		"readonly ready_marker=/var/lib/agent-os/orca-skills-ready",
 		"if [ -f \"$ready_marker\" ]",
+		"cd \"$agent_home\"",
 		"$agent_home/.agents/skills",
+		"for attempt in 1 2 3",
 		"/usr/sbin/runuser --user agent -- /usr/bin/env",
 		"/usr/bin/orca skills install \\",
 		"--skill orca-cli",
@@ -470,7 +473,9 @@ func TestK3sCiliumScriptCreatesReadyClusterWithNarrowAgentAccess(t *testing.T) {
 			"write-kubeconfig-mode: \"0600\"",
 			"https://get.k3s.io",
 			"INSTALL_K3S_CHANNEL=stable",
+			"k3s installer failed after 5 attempts",
 			"https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt",
+			"--retry-all-errors",
 			"sha256sum --check",
 			"x86_64) cli_arch=amd64",
 			"aarch64|arm64) cli_arch=arm64",
